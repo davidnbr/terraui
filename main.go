@@ -29,6 +29,7 @@ var (
 	updateStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	destroyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	replaceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
+	importStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("240"))
 )
 
@@ -92,6 +93,8 @@ func getSymbol(action string) string {
 		return "~"
 	case "replace":
 		return "±"
+	case "import":
+		return "←"
 	default:
 		return "·"
 	}
@@ -107,6 +110,8 @@ func getStyleForAction(action string) lipgloss.Style {
 		return destroyStyle
 	case "replace":
 		return replaceStyle
+	case "import":
+		return importStyle
 	default:
 		return lipgloss.NewStyle()
 	}
@@ -117,7 +122,7 @@ func parsePlan(reader io.Reader) []ResourceChange {
 	resources := make([]ResourceChange, 0)
 
 	// Pattern: # resource_address will be created/destroyed/etc
-	headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced)`)
+	headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
 
 	var currentResource *ResourceChange
 	inResource := false
@@ -146,6 +151,8 @@ func parsePlan(reader io.Reader) []ResourceChange {
 				action = "destroy"
 			case "must be replaced":
 				action = "replace"
+			case "will be imported":
+				action = "import"
 			}
 
 			currentResource = &ResourceChange{
