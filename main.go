@@ -20,23 +20,35 @@ type ResourceChange struct {
 }
 
 type Model struct {
-	resources []ResourceChange
-	cursor    int
+	resources    []ResourceChange
+	cursor       int
+	height       int
+	offset       int
+	ready        bool
 }
 
 var (
-	createStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	updateStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	destroyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	replaceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
-	importStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("240"))
+	createStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // Green
+	updateStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))  // Yellow
+	destroyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))  // Red
+	replaceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))  // Magenta
+	importStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))  // Cyan
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))  // Dim gray
+	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236"))
+	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 )
 
-func (m Model) Init() tea.Cmd { return nil }
+func (m Model) Init() tea.Cmd {
+	return nil
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.height = msg.Height
+		m.ready = true
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -59,28 +71,157 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
-	s := "Terraform Plan Viewer (↑/↓: navigate, Enter/Space: expand, q: quit)\n\n"
+	if !m.ready {
+		return "Loading..."
+	}
+
+	var lines []string
+	header := headerStyle.Render("Terraform Plan Viewer") + dimStyle.Render(" (↑/↓: navigate, Enter: expand, q: quit)")
+	lines = append(lines, header, "")
+
+	// Track which line the cursor is on for scrolling
+	cursorLine := 0
+	currentLine := 0
 
 	for i, rc := range m.resources {
 		symbol := getSymbol(rc.Action)
 		style := getStyleForAction(rc.Action)
 
-		line := fmt.Sprintf("%s %s", symbol, rc.Address)
+		// Build the resource line
+		prefix := "  "
 		if i == m.cursor {
-			line = selectedStyle.Render("► " + line)
-		} else {
-			line = "  " + line
+			prefix = "► "
+			cursorLine = currentLine
 		}
-		s += style.Render(line) + "\n"
 
+		resourceLine := fmt.Sprintf("%s%s %s", prefix, symbol, rc.Address)
+		if i == m.cursor {
+			resourceLine = selectedStyle.Render(resourceLine)
+		} else {
+			resourceLine = style.Render(resourceLine)
+		}
+		lines = append(lines, resourceLine)
+		currentLine++
+
+		// Add expanded attributes
 		if rc.Expanded && len(rc.Attributes) > 0 {
 			for _, attr := range rc.Attributes {
-				s += "    " + attr + "\n"
+				styledAttr := styleAttribute(attr)
+				lines = append(lines, "    "+styledAttr)
+				currentLine++
 			}
 		}
 	}
 
-	return s
+	// Calculate visible area (reserve 2 lines for header)
+	visibleHeight := m.height - 3
+	if visibleHeight < 5 {
+		visibleHeight = 5
+	}
+
+	// Adjust offset to keep cursor visible
+	if cursorLine < m.offset {
+		m.offset = cursorLine
+	} else if cursorLine >= m.offset+visibleHeight-2 {
+		m.offset = cursorLine - visibleHeight + 3
+	}
+
+	// Clamp offset
+	if m.offset < 0 {
+		m.offset = 0
+	}
+	maxOffset := len(lines) - visibleHeight
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.offset > maxOffset {
+		m.offset = maxOffset
+	}
+
+	// Slice visible lines (header is always visible)
+	startLine := 2 + m.offset // Skip header lines
+	endLine := startLine + visibleHeight
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+	if startLine > len(lines) {
+		startLine = len(lines)
+	}
+
+	// Build output with header + visible content
+	var output strings.Builder
+	output.WriteString(lines[0] + "\n") // Header
+	output.WriteString(lines[1] + "\n") // Empty line
+
+	for i := startLine; i < endLine; i++ {
+		output.WriteString(lines[i] + "\n")
+	}
+
+	// Add scroll indicators
+	if m.offset > 0 {
+		output.WriteString(dimStyle.Render("  ↑ more above\n"))
+	}
+	if endLine < len(lines) {
+		output.WriteString(dimStyle.Render("  ↓ more below\n"))
+	}
+
+	// Footer with summary
+	summary := fmt.Sprintf("\n%s", getSummary(m.resources))
+	output.WriteString(dimStyle.Render(summary))
+
+	return output.String()
+}
+
+func styleAttribute(attr string) string {
+	trimmed := strings.TrimSpace(attr)
+
+	// Check for "unchanged" comments
+	if strings.Contains(trimmed, "unchanged") {
+		return dimStyle.Render(attr)
+	}
+
+	// Style based on prefix
+	if strings.HasPrefix(trimmed, "+") {
+		return createStyle.Render(attr)
+	} else if strings.HasPrefix(trimmed, "-") {
+		return destroyStyle.Render(attr)
+	} else if strings.HasPrefix(trimmed, "~") {
+		return updateStyle.Render(attr)
+	} else if strings.HasPrefix(trimmed, "#") {
+		return dimStyle.Render(attr)
+	}
+
+	// Default: unchanged attributes shown dimmed
+	return dimStyle.Render(attr)
+}
+
+func getSummary(resources []ResourceChange) string {
+	counts := make(map[string]int)
+	for _, r := range resources {
+		counts[r.Action]++
+	}
+
+	var parts []string
+	if c := counts["create"]; c > 0 {
+		parts = append(parts, createStyle.Render(fmt.Sprintf("+%d create", c)))
+	}
+	if c := counts["update"]; c > 0 {
+		parts = append(parts, updateStyle.Render(fmt.Sprintf("~%d update", c)))
+	}
+	if c := counts["destroy"]; c > 0 {
+		parts = append(parts, destroyStyle.Render(fmt.Sprintf("-%d destroy", c)))
+	}
+	if c := counts["replace"]; c > 0 {
+		parts = append(parts, replaceStyle.Render(fmt.Sprintf("±%d replace", c)))
+	}
+	if c := counts["import"]; c > 0 {
+		parts = append(parts, importStyle.Render(fmt.Sprintf("←%d import", c)))
+	}
+
+	if len(parts) == 0 {
+		return "No changes"
+	}
+	return strings.Join(parts, "  ")
 }
 
 func getSymbol(action string) string {
@@ -117,8 +258,9 @@ func getStyleForAction(action string) lipgloss.Style {
 	}
 }
 
+var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
 func stripANSI(s string) string {
-	ansiPattern := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
@@ -217,7 +359,7 @@ func main() {
 	}
 
 	m := Model{resources: resources}
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
