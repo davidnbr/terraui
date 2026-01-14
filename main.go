@@ -117,6 +117,11 @@ func getStyleForAction(action string) lipgloss.Style {
 	}
 }
 
+func stripANSI(s string) string {
+	ansiPattern := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	return ansiPattern.ReplaceAllString(s, "")
+}
+
 func parsePlan(reader io.Reader) []ResourceChange {
 	scanner := bufio.NewScanner(reader)
 	resources := make([]ResourceChange, 0)
@@ -129,7 +134,7 @@ func parsePlan(reader io.Reader) []ResourceChange {
 	bracketDepth := 0
 
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := stripANSI(scanner.Text())
 
 		// Check for resource header comment
 		if match := headerPattern.FindStringSubmatch(line); match != nil {
