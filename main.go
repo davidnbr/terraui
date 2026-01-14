@@ -20,11 +20,13 @@ type ResourceChange struct {
 }
 
 type Model struct {
-	resources    []ResourceChange
-	cursor       int
-	height       int
-	offset       int
-	ready        bool
+	resources     []ResourceChange
+	cursor        int
+	height        int
+	offset        int
+	ready         bool
+	totalLines    int
+	cursorLine    int
 }
 
 var (
@@ -42,11 +44,61 @@ func (m Model) Init() tea.Cmd {
 	return nil
 }
 
+func (m *Model) updateLineInfo() {
+	line := 0
+	for i, rc := range m.resources {
+		if i == m.cursor {
+			m.cursorLine = line
+		}
+		line++ // Resource header line
+		if rc.Expanded {
+			line += len(rc.Attributes)
+		}
+	}
+	m.totalLines = line
+}
+
+func (m *Model) ensureCursorVisible() {
+	visibleHeight := m.height - 5 // Reserve for header, footer, scroll indicators
+	if visibleHeight < 5 {
+		visibleHeight = 5
+	}
+
+	// Keep cursor in view
+	if m.cursorLine < m.offset {
+		m.offset = m.cursorLine
+	} else if m.cursorLine >= m.offset+visibleHeight {
+		m.offset = m.cursorLine - visibleHeight + 1
+	}
+
+	m.clampOffset()
+}
+
+func (m *Model) clampOffset() {
+	visibleHeight := m.height - 5
+	if visibleHeight < 5 {
+		visibleHeight = 5
+	}
+
+	if m.offset < 0 {
+		m.offset = 0
+	}
+	maxOffset := m.totalLines - visibleHeight
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.offset > maxOffset {
+		m.offset = maxOffset
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		m.ready = true
+		m.updateLineInfo()
+		m.clampOffset()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -56,15 +108,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
+				m.updateLineInfo()
+				m.ensureCursorVisible()
 			}
 		case "down", "j":
 			if m.cursor < len(m.resources)-1 {
 				m.cursor++
+				m.updateLineInfo()
+				m.ensureCursorVisible()
 			}
 		case "enter", " ":
 			if m.cursor < len(m.resources) {
 				m.resources[m.cursor].Expanded = !m.resources[m.cursor].Expanded
+				m.updateLineInfo()
+				m.clampOffset()
 			}
+		// Scroll controls (independent of cursor)
+		case "pgup", "ctrl+u":
+			m.offset -= m.height / 2
+			m.clampOffset()
+		case "pgdown", "ctrl+d":
+			m.offset += m.height / 2
+			m.clampOffset()
+		case "home", "g":
+			m.offset = 0
+			m.cursor = 0
+			m.updateLineInfo()
+		case "end", "G":
+			m.cursor = len(m.resources) - 1
+			m.updateLineInfo()
+			m.offset = m.totalLines // Will be clamped
+			m.clampOffset()
 		}
 	}
 	return m, nil
@@ -75,14 +149,8 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
+	// Build all content lines
 	var lines []string
-	header := headerStyle.Render("Terraform Plan Viewer") + dimStyle.Render(" (↑/↓: navigate, Enter: expand, q: quit)")
-	lines = append(lines, header, "")
-
-	// Track which line the cursor is on for scrolling
-	cursorLine := 0
-	currentLine := 0
-
 	for i, rc := range m.resources {
 		symbol := getSymbol(rc.Action)
 		style := getStyleForAction(rc.Action)
@@ -91,7 +159,6 @@ func (m Model) View() string {
 		prefix := "  "
 		if i == m.cursor {
 			prefix = "► "
-			cursorLine = currentLine
 		}
 
 		resourceLine := fmt.Sprintf("%s%s %s", prefix, symbol, rc.Address)
@@ -101,73 +168,61 @@ func (m Model) View() string {
 			resourceLine = style.Render(resourceLine)
 		}
 		lines = append(lines, resourceLine)
-		currentLine++
 
 		// Add expanded attributes
 		if rc.Expanded && len(rc.Attributes) > 0 {
 			for _, attr := range rc.Attributes {
 				styledAttr := styleAttribute(attr)
 				lines = append(lines, "    "+styledAttr)
-				currentLine++
 			}
 		}
 	}
 
-	// Calculate visible area (reserve 2 lines for header)
-	visibleHeight := m.height - 3
+	// Calculate visible area
+	visibleHeight := m.height - 5 // Reserve for header, summary, scroll indicators
 	if visibleHeight < 5 {
 		visibleHeight = 5
 	}
 
-	// Adjust offset to keep cursor visible
-	if cursorLine < m.offset {
-		m.offset = cursorLine
-	} else if cursorLine >= m.offset+visibleHeight-2 {
-		m.offset = cursorLine - visibleHeight + 3
-	}
-
-	// Clamp offset
-	if m.offset < 0 {
-		m.offset = 0
-	}
-	maxOffset := len(lines) - visibleHeight
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-	if m.offset > maxOffset {
-		m.offset = maxOffset
-	}
-
-	// Slice visible lines (header is always visible)
-	startLine := 2 + m.offset // Skip header lines
+	// Slice visible lines based on offset
+	startLine := m.offset
 	endLine := startLine + visibleHeight
-	if endLine > len(lines) {
-		endLine = len(lines)
-	}
 	if startLine > len(lines) {
 		startLine = len(lines)
 	}
+	if endLine > len(lines) {
+		endLine = len(lines)
+	}
+	if startLine < 0 {
+		startLine = 0
+	}
 
-	// Build output with header + visible content
+	// Build output
 	var output strings.Builder
-	output.WriteString(lines[0] + "\n") // Header
-	output.WriteString(lines[1] + "\n") // Empty line
 
+	// Header
+	header := headerStyle.Render("Terraform Plan Viewer")
+	controls := dimStyle.Render(" ↑↓:select  Enter:expand  PgUp/Dn:scroll  g/G:top/end  q:quit")
+	output.WriteString(header + controls + "\n\n")
+
+	// Scroll indicator (top)
+	if startLine > 0 {
+		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more above\n", startLine)))
+	}
+
+	// Content
 	for i := startLine; i < endLine; i++ {
 		output.WriteString(lines[i] + "\n")
 	}
 
-	// Add scroll indicators
-	if m.offset > 0 {
-		output.WriteString(dimStyle.Render("  ↑ more above\n"))
-	}
-	if endLine < len(lines) {
-		output.WriteString(dimStyle.Render("  ↓ more below\n"))
+	// Scroll indicator (bottom)
+	remaining := len(lines) - endLine
+	if remaining > 0 {
+		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more below\n", remaining)))
 	}
 
 	// Footer with summary
-	summary := fmt.Sprintf("\n%s", getSummary(m.resources))
-	output.WriteString(dimStyle.Render(summary))
+	output.WriteString("\n" + getSummary(m.resources))
 
 	return output.String()
 }
