@@ -19,14 +19,20 @@ type ResourceChange struct {
 	Expanded   bool
 }
 
+// Line represents a single display line
+type Line struct {
+	ResourceIdx int    // Which resource this belongs to
+	AttrIdx     int    // -1 for resource header, >=0 for attribute
+	Content     string // Raw content for attributes
+}
+
 type Model struct {
-	resources     []ResourceChange
-	cursor        int
-	height        int
-	offset        int
-	ready         bool
-	totalLines    int
-	cursorLine    int
+	resources  []ResourceChange
+	lines      []Line  // All visible lines
+	cursor     int     // Current line index
+	height     int
+	offset     int
+	ready      bool
 }
 
 var (
@@ -35,7 +41,7 @@ var (
 	destroyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))  // Red
 	replaceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))  // Magenta
 	importStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))  // Cyan
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))  // Dim gray
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236"))
 	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 )
@@ -44,38 +50,51 @@ func (m Model) Init() tea.Cmd {
 	return nil
 }
 
-func (m *Model) updateLineInfo() {
-	line := 0
+// Rebuild the lines slice based on current expand state
+func (m *Model) rebuildLines() {
+	m.lines = nil
 	for i, rc := range m.resources {
-		if i == m.cursor {
-			m.cursorLine = line
-		}
-		line++ // Resource header line
+		// Add resource header line
+		m.lines = append(m.lines, Line{ResourceIdx: i, AttrIdx: -1})
+
+		// Add attribute lines if expanded
 		if rc.Expanded {
-			line += len(rc.Attributes)
+			for j := range rc.Attributes {
+				m.lines = append(m.lines, Line{ResourceIdx: i, AttrIdx: j, Content: rc.Attributes[j]})
+			}
 		}
 	}
-	m.totalLines = line
+}
+
+func (m *Model) clampCursor() {
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= len(m.lines) {
+		m.cursor = len(m.lines) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
 }
 
 func (m *Model) ensureCursorVisible() {
-	visibleHeight := m.height - 5 // Reserve for header, footer, scroll indicators
+	visibleHeight := m.height - 6
 	if visibleHeight < 5 {
 		visibleHeight = 5
 	}
 
-	// Keep cursor in view
-	if m.cursorLine < m.offset {
-		m.offset = m.cursorLine
-	} else if m.cursorLine >= m.offset+visibleHeight {
-		m.offset = m.cursorLine - visibleHeight + 1
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	} else if m.cursor >= m.offset+visibleHeight {
+		m.offset = m.cursor - visibleHeight + 1
 	}
 
 	m.clampOffset()
 }
 
 func (m *Model) clampOffset() {
-	visibleHeight := m.height - 5
+	visibleHeight := m.height - 6
 	if visibleHeight < 5 {
 		visibleHeight = 5
 	}
@@ -83,7 +102,7 @@ func (m *Model) clampOffset() {
 	if m.offset < 0 {
 		m.offset = 0
 	}
-	maxOffset := m.totalLines - visibleHeight
+	maxOffset := len(m.lines) - visibleHeight
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
@@ -97,7 +116,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		m.ready = true
-		m.updateLineInfo()
+		m.rebuildLines()
 		m.clampOffset()
 		return m, nil
 
@@ -105,39 +124,65 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
-				m.updateLineInfo()
 				m.ensureCursorVisible()
 			}
+
 		case "down", "j":
-			if m.cursor < len(m.resources)-1 {
+			if m.cursor < len(m.lines)-1 {
 				m.cursor++
-				m.updateLineInfo()
 				m.ensureCursorVisible()
 			}
+
 		case "enter", " ":
-			if m.cursor < len(m.resources) {
-				m.resources[m.cursor].Expanded = !m.resources[m.cursor].Expanded
-				m.updateLineInfo()
-				m.clampOffset()
+			// Toggle expand only if on a resource header line
+			if m.cursor < len(m.lines) {
+				line := m.lines[m.cursor]
+				if line.AttrIdx == -1 { // Resource header
+					m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
+					m.rebuildLines()
+					m.clampCursor()
+					m.clampOffset()
+				}
 			}
-		// Scroll controls (independent of cursor)
+
 		case "pgup", "ctrl+u":
-			m.offset -= m.height / 2
-			m.clampOffset()
+			m.cursor -= m.height / 2
+			m.clampCursor()
+			m.ensureCursorVisible()
+
 		case "pgdown", "ctrl+d":
-			m.offset += m.height / 2
-			m.clampOffset()
+			m.cursor += m.height / 2
+			m.clampCursor()
+			m.ensureCursorVisible()
+
 		case "home", "g":
-			m.offset = 0
 			m.cursor = 0
-			m.updateLineInfo()
+			m.offset = 0
+
 		case "end", "G":
-			m.cursor = len(m.resources) - 1
-			m.updateLineInfo()
-			m.offset = m.totalLines // Will be clamped
+			m.cursor = len(m.lines) - 1
+			m.ensureCursorVisible()
+
+		case "e":
+			// Expand all
+			for i := range m.resources {
+				m.resources[i].Expanded = true
+			}
+			m.rebuildLines()
+			m.clampCursor()
+			m.clampOffset()
+
+		case "c":
+			// Collapse all
+			for i := range m.resources {
+				m.resources[i].Expanded = false
+			}
+			m.rebuildLines()
+			m.clampCursor()
 			m.clampOffset()
 		}
 	}
@@ -149,49 +194,20 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
-	// Build all content lines
-	var lines []string
-	for i, rc := range m.resources {
-		symbol := getSymbol(rc.Action)
-		style := getStyleForAction(rc.Action)
-
-		// Build the resource line
-		prefix := "  "
-		if i == m.cursor {
-			prefix = "► "
-		}
-
-		resourceLine := fmt.Sprintf("%s%s %s", prefix, symbol, rc.Address)
-		if i == m.cursor {
-			resourceLine = selectedStyle.Render(resourceLine)
-		} else {
-			resourceLine = style.Render(resourceLine)
-		}
-		lines = append(lines, resourceLine)
-
-		// Add expanded attributes
-		if rc.Expanded && len(rc.Attributes) > 0 {
-			for _, attr := range rc.Attributes {
-				styledAttr := styleAttribute(attr)
-				lines = append(lines, "    "+styledAttr)
-			}
-		}
-	}
-
 	// Calculate visible area
-	visibleHeight := m.height - 5 // Reserve for header, summary, scroll indicators
+	visibleHeight := m.height - 6
 	if visibleHeight < 5 {
 		visibleHeight = 5
 	}
 
-	// Slice visible lines based on offset
+	// Slice visible lines
 	startLine := m.offset
 	endLine := startLine + visibleHeight
-	if startLine > len(lines) {
-		startLine = len(lines)
+	if startLine > len(m.lines) {
+		startLine = len(m.lines)
 	}
-	if endLine > len(lines) {
-		endLine = len(lines)
+	if endLine > len(m.lines) {
+		endLine = len(m.lines)
 	}
 	if startLine < 0 {
 		startLine = 0
@@ -202,23 +218,53 @@ func (m Model) View() string {
 
 	// Header
 	header := headerStyle.Render("Terraform Plan Viewer")
-	controls := dimStyle.Render(" ↑↓:select  Enter:expand  PgUp/Dn:scroll  g/G:top/end  q:quit")
+	controls := dimStyle.Render(" ↑↓:navigate  ^u/^d:half-page  Enter:expand  e/c:expand/collapse all  q:quit")
 	output.WriteString(header + controls + "\n\n")
 
 	// Scroll indicator (top)
 	if startLine > 0 {
-		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more above\n", startLine)))
+		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines above\n", startLine)))
 	}
 
 	// Content
 	for i := startLine; i < endLine; i++ {
-		output.WriteString(lines[i] + "\n")
+		line := m.lines[i]
+		isSelected := i == m.cursor
+
+		if line.AttrIdx == -1 {
+			// Resource header line
+			rc := m.resources[line.ResourceIdx]
+			symbol := getSymbol(rc.Action)
+			style := getStyleForAction(rc.Action)
+
+			expandIcon := "▸"
+			if rc.Expanded {
+				expandIcon = "▾"
+			}
+
+			content := fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address)
+			if isSelected {
+				content = selectedStyle.Render("► " + content)
+			} else {
+				content = "  " + style.Render(content)
+			}
+			output.WriteString(content + "\n")
+		} else {
+			// Attribute line
+			attr := line.Content
+			styledAttr := styleAttribute(attr)
+			if isSelected {
+				output.WriteString(selectedStyle.Render("►   " + attr) + "\n")
+			} else {
+				output.WriteString("    " + styledAttr + "\n")
+			}
+		}
 	}
 
 	// Scroll indicator (bottom)
-	remaining := len(lines) - endLine
+	remaining := len(m.lines) - endLine
 	if remaining > 0 {
-		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more below\n", remaining)))
+		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines below\n", remaining)))
 	}
 
 	// Footer with summary
@@ -323,7 +369,6 @@ func parsePlan(reader io.Reader) []ResourceChange {
 	scanner := bufio.NewScanner(reader)
 	resources := make([]ResourceChange, 0)
 
-	// Pattern: # resource_address will be created/destroyed/etc
 	headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
 
 	var currentResource *ResourceChange
@@ -333,9 +378,7 @@ func parsePlan(reader io.Reader) []ResourceChange {
 	for scanner.Scan() {
 		line := stripANSI(scanner.Text())
 
-		// Check for resource header comment
 		if match := headerPattern.FindStringSubmatch(line); match != nil {
-			// Save previous resource if exists
 			if currentResource != nil {
 				resources = append(resources, *currentResource)
 			}
@@ -365,20 +408,16 @@ func parsePlan(reader io.Reader) []ResourceChange {
 			continue
 		}
 
-		// Check for resource block start (e.g., "-/+ resource", "+ resource")
 		if currentResource != nil && strings.Contains(line, " resource \"") {
 			inResource = true
-			// Count brackets on this line (typically has opening {)
 			bracketDepth = strings.Count(line, "{") - strings.Count(line, "}")
 			continue
 		}
 
-		// Track bracket depth when inside resource
 		if inResource {
 			bracketDepth += strings.Count(line, "{")
 			bracketDepth -= strings.Count(line, "}")
 
-			// Capture attributes (skip the opening brace line)
 			if currentResource != nil && !strings.Contains(line, " resource \"") {
 				trimmed := strings.TrimSpace(line)
 				if trimmed != "" && trimmed != "{" && trimmed != "}" {
@@ -386,7 +425,6 @@ func parsePlan(reader io.Reader) []ResourceChange {
 				}
 			}
 
-			// End of resource block
 			if bracketDepth == 0 && strings.Contains(line, "}") {
 				if currentResource != nil {
 					resources = append(resources, *currentResource)
@@ -397,7 +435,6 @@ func parsePlan(reader io.Reader) []ResourceChange {
 		}
 	}
 
-	// Add last resource if exists
 	if currentResource != nil {
 		resources = append(resources, *currentResource)
 	}
@@ -414,6 +451,8 @@ func main() {
 	}
 
 	m := Model{resources: resources}
+	m.rebuildLines()
+
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
