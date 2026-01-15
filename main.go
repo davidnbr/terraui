@@ -120,6 +120,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampOffset()
 		return m, nil
 
+	case tea.MouseMsg:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			m.cursor -= 3
+			m.clampCursor()
+			m.ensureCursorVisible()
+		case tea.MouseButtonWheelDown:
+			m.cursor += 3
+			m.clampCursor()
+			m.ensureCursorVisible()
+		case tea.MouseButtonLeft:
+			if msg.Action == tea.MouseActionPress {
+				// Calculate which line was clicked (accounting for header offset)
+				clickedLine := m.offset + msg.Y - 3 // 3 = header lines offset
+				if msg.Y >= 3 && clickedLine >= 0 && clickedLine < len(m.lines) {
+					if m.cursor == clickedLine {
+						// Double-click behavior: if already selected, toggle expand
+						line := m.lines[clickedLine]
+						if line.AttrIdx == -1 {
+							m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
+							m.rebuildLines()
+							m.clampCursor()
+							m.clampOffset()
+						}
+					} else {
+						m.cursor = clickedLine
+					}
+				}
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -453,7 +485,7 @@ func main() {
 	m := Model{resources: resources}
 	m.rebuildLines()
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
