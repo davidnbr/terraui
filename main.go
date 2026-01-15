@@ -132,9 +132,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible()
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionPress {
-				// Calculate which line was clicked (accounting for header offset)
-				clickedLine := m.offset + msg.Y - 3 // 3 = header lines offset
-				if msg.Y >= 3 && clickedLine >= 0 && clickedLine < len(m.lines) {
+				// Calculate which line was clicked (accounting for header and scroll indicator)
+				headerOffset := 2 // Header + empty line
+				if m.offset > 0 {
+					headerOffset = 3 // +1 for "more above" indicator
+				}
+				clickedLine := m.offset + msg.Y - headerOffset
+				if msg.Y >= headerOffset && clickedLine >= 0 && clickedLine < len(m.lines) {
 					if m.cursor == clickedLine {
 						// Double-click behavior: if already selected, toggle expand
 						line := m.lines[clickedLine]
