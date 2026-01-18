@@ -47,26 +47,26 @@ type Model struct {
 }
 
 var (
-	// Resource header colors (bright/bold for titles)
-	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)   // Green
-	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)   // Yellow
-	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)   // Red
-	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)   // Magenta
-	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)   // Cyan
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // Bright red
-	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true) // Orange
+	// Resource header colors (Catppuccin Mocha + Vibrant Red)
+	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true) // Green
+	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true) // Yellow
+	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
+	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true) // Mauve
+	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true) // Sky
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
+	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true) // Peach
 
-	// Attribute colors (dimmer versions for content)
-	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("34"))  // Dim green for +
-	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("124")) // Dim red for -
-	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("136")) // Dim yellow for ~
-	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true) // Bold red for # forces replacement
+	// Attribute colors
+	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")) // Green
+	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")) // Vibrant Red
+	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")) // Yellow
+	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
 
 	// UI colors
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244")) // Gray for comments
-	defaultStyle  = lipgloss.NewStyle()                                    // White/default for unchanged attrs
-	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236"))
-	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")) // Overlay1
+	defaultStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")) // Text
+	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#45475a")) // Surface1
+	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89b4fa")) // Blue
 )
 
 func (m Model) Init() tea.Cmd {
@@ -367,14 +367,29 @@ func (m Model) View() string {
 				expandIcon = "▾"
 			}
 
-			// Show full title: address + action text (e.g., "local_file.config must be replaced")
-			content := fmt.Sprintf("%s %s %s %s", expandIcon, symbol, rc.Address, rc.ActionText)
+			// Show full title: address + action text
 			if isSelected {
-				content = selectedStyle.Render("► " + content)
+				// Preserve semantic colors but add selection background
+				selBg := lipgloss.Color("#45475a") // Surface1
+				
+				// Arrow/Gutter
+				arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")).Background(selBg).Bold(true)
+				
+				// Address part (Icon + Symbol + Address) - Inherit action color, add Bg
+				prefixStyle := style.Copy().Background(selBg)
+				prefix := prefixStyle.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
+				
+				// Action Text part - Inherit dim color, add Bg
+				suffixStyle := dimStyle.Copy().Background(selBg)
+				suffix := suffixStyle.Render(rc.ActionText)
+				
+				output.WriteString(fmt.Sprintf("%s%s %s\n", arrowStyle.Render("► "), prefix, suffix))
 			} else {
-				content = "  " + style.Render(content)
+				// Unselected: Color hierarchy
+				prefix := style.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
+				suffix := dimStyle.Render(rc.ActionText)
+				output.WriteString(fmt.Sprintf("  %s %s\n", prefix, suffix))
 			}
-			output.WriteString(content + "\n")
 
 		case "attribute":
 			attr := line.Content
@@ -428,8 +443,8 @@ func styleAttributePrefix(attr string) string {
 		return dimStyle.Render(attr)
 	}
 
-	// Unchanged attributes - white/default
-	return defaultStyle.Render(attr)
+	// Unchanged attributes - gray/dim to reduce noise
+	return dimStyle.Render(attr)
 }
 
 func getSummary(resources []ResourceChange, diagnostics []Diagnostic) string {
