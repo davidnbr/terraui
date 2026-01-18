@@ -499,17 +499,73 @@ func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
+func parseDiagnosticBlock(lines []string, errorPattern, warningPattern *regexp.Regexp) *Diagnostic {
+	if len(lines) == 0 {
+		return nil
+	}
+
+	var severity, summary string
+	var details []string
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		// Check for Error: or Warning: to determine severity and get summary
+		if match := errorPattern.FindStringSubmatch(trimmed); match != nil {
+			if severity == "" {
+				// First error becomes the summary
+				severity = "error"
+				summary = match[1]
+			} else {
+				// Additional errors go into details
+				details = append(details, trimmed)
+			}
+			continue
+		}
+
+		if match := warningPattern.FindStringSubmatch(trimmed); match != nil {
+			if severity == "" {
+				// First warning becomes the summary
+				severity = "warning"
+				summary = match[1]
+			} else {
+				// Additional warnings go into details
+				details = append(details, trimmed)
+			}
+			continue
+		}
+
+		// After we have a severity, collect remaining lines as details
+		if severity != "" && i > 0 {
+			details = append(details, trimmed)
+		}
+	}
+
+	if severity == "" || summary == "" {
+		return nil
+	}
+
+	return &Diagnostic{
+		Severity: severity,
+		Summary:  summary,
+		Detail:   details,
+	}
+}
+
 func parsePlan(reader io.Reader) ([]ResourceChange, []Diagnostic) {
 	scanner := bufio.NewScanner(reader)
 	resources := make([]ResourceChange, 0)
 	diagnostics := make([]Diagnostic, 0)
 
 	headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
-	errorPattern := regexp.MustCompile(`^│\s*Error:\s*(.+)$`)
-	warningPattern := regexp.MustCompile(`^│\s*Warning:\s*(.+)$`)
+	errorPattern := regexp.MustCompile(`Error:\s*(.+)`)
+	warningPattern := regexp.MustCompile(`Warning:\s*(.+)`)
 
 	var currentResource *ResourceChange
-	var currentDiag *Diagnostic
+	var diagLines []string
 	inResource := false
 	inDiagnostic := false
 	bracketDepth := 0
@@ -520,45 +576,29 @@ func parsePlan(reader io.Reader) ([]ResourceChange, []Diagnostic) {
 		// Check for diagnostic block start (╷)
 		if strings.HasPrefix(line, "╷") {
 			inDiagnostic = true
+			diagLines = make([]string, 0)
 			continue
 		}
 
 		// Check for diagnostic block end (╵)
 		if strings.HasPrefix(line, "╵") {
-			if currentDiag != nil {
-				diagnostics = append(diagnostics, *currentDiag)
-				currentDiag = nil
+			if inDiagnostic && len(diagLines) > 0 {
+				// Process collected diagnostic lines
+				diag := parseDiagnosticBlock(diagLines, errorPattern, warningPattern)
+				if diag != nil {
+					diagnostics = append(diagnostics, *diag)
+				}
 			}
+			diagLines = nil
 			inDiagnostic = false
 			continue
 		}
 
-		// Parse error/warning inside diagnostic block
+		// Collect lines inside diagnostic block
 		if inDiagnostic {
-			if match := errorPattern.FindStringSubmatch(line); match != nil {
-				currentDiag = &Diagnostic{
-					Severity: "error",
-					Summary:  match[1],
-					Detail:   make([]string, 0),
-				}
-				continue
-			}
-			if match := warningPattern.FindStringSubmatch(line); match != nil {
-				currentDiag = &Diagnostic{
-					Severity: "warning",
-					Summary:  match[1],
-					Detail:   make([]string, 0),
-				}
-				continue
-			}
-			// Capture detail lines
-			if currentDiag != nil && strings.HasPrefix(line, "│") {
-				detail := strings.TrimPrefix(line, "│")
-				detail = strings.TrimSpace(detail)
-				if detail != "" {
-					currentDiag.Detail = append(currentDiag.Detail, detail)
-				}
-			}
+			// Strip the │ prefix and collect
+			content := strings.TrimPrefix(line, "│")
+			diagLines = append(diagLines, content)
 			continue
 		}
 
