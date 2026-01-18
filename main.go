@@ -39,11 +39,13 @@ type Line struct {
 type Model struct {
 	resources   []ResourceChange
 	diagnostics []Diagnostic
-	lines       []Line // All visible lines
-	cursor      int    // Current line index
+	logs        []string // Generic logs (init, apply progress, etc.)
+	lines       []Line   // All visible lines
+	cursor      int      // Current line index
 	height      int
 	offset      int
 	ready       bool
+	showLogs    bool // Toggle between Plan and Log view
 }
 
 var (
@@ -77,6 +79,15 @@ func (m Model) Init() tea.Cmd {
 func (m *Model) rebuildLines() {
 	m.lines = nil
 
+	if m.showLogs {
+		// Log View
+		for i, log := range m.logs {
+			m.lines = append(m.lines, Line{Type: "log", Content: log, AttrIdx: i})
+		}
+		return
+	}
+
+	// Plan View
 	// Add diagnostics first (errors and warnings)
 	for i, diag := range m.diagnostics {
 		m.lines = append(m.lines, Line{Type: "diagnostic", DiagIdx: i, ResourceIdx: -1, AttrIdx: -1})
@@ -174,18 +185,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				clickedLine := m.offset + msg.Y - headerOffset
 				if msg.Y >= headerOffset && clickedLine >= 0 && clickedLine < len(m.lines) {
 					if m.cursor == clickedLine {
-						// Double-click behavior: if already selected, toggle expand
+						// Double-click behavior: if already selected, toggle expand (only in Plan view)
 						line := m.lines[clickedLine]
-						if line.Type == "resource" {
-							m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
-							m.rebuildLines()
-							m.clampCursor()
-							m.clampOffset()
-						} else if line.Type == "diagnostic" {
-							m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
-							m.rebuildLines()
-							m.clampCursor()
-							m.clampOffset()
+						if !m.showLogs {
+							if line.Type == "resource" {
+								m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
+								m.rebuildLines()
+								m.clampCursor()
+								m.clampOffset()
+							} else if line.Type == "diagnostic" {
+								m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
+								m.rebuildLines()
+								m.clampCursor()
+								m.clampOffset()
+							}
 						}
 					} else {
 						m.cursor = clickedLine
@@ -199,6 +212,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+
+		case "l", "L":
+			// Toggle Logs view
+			m.showLogs = !m.showLogs
+			m.rebuildLines()
+			m.cursor = 0
+			m.offset = 0
+			return m, nil
 
 		case "up", "k":
 			if m.cursor > 0 {
@@ -214,7 +235,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter", " ":
 			// Toggle expand on header lines
-			if m.cursor < len(m.lines) {
+			if m.cursor < len(m.lines) && !m.showLogs {
 				line := m.lines[m.cursor]
 				if line.Type == "resource" {
 					m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
@@ -248,28 +269,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible()
 
 		case "e":
-			// Expand all
-			for i := range m.resources {
-				m.resources[i].Expanded = true
+			if !m.showLogs {
+				// Expand all
+				for i := range m.resources {
+					m.resources[i].Expanded = true
+				}
+				for i := range m.diagnostics {
+					m.diagnostics[i].Expanded = true
+				}
+				m.rebuildLines()
+				m.clampCursor()
+				m.clampOffset()
 			}
-			for i := range m.diagnostics {
-				m.diagnostics[i].Expanded = true
-			}
-			m.rebuildLines()
-			m.clampCursor()
-			m.clampOffset()
 
 		case "c":
-			// Collapse all
-			for i := range m.resources {
-				m.resources[i].Expanded = false
+			if !m.showLogs {
+				// Collapse all
+				for i := range m.resources {
+					m.resources[i].Expanded = false
+				}
+				for i := range m.diagnostics {
+					m.diagnostics[i].Expanded = false
+				}
+				m.rebuildLines()
+				m.clampCursor()
+				m.clampOffset()
 			}
-			for i := range m.diagnostics {
-				m.diagnostics[i].Expanded = false
-			}
-			m.rebuildLines()
-			m.clampCursor()
-			m.clampOffset()
 		}
 	}
 	return m, nil
@@ -303,8 +328,15 @@ func (m Model) View() string {
 	var output strings.Builder
 
 	// Header
-	header := headerStyle.Render("Terraform Plan Viewer")
-	controls := dimStyle.Render(" ↑↓:navigate  ^u/^d:half-page  Enter:expand  e/c:expand/collapse all  q:quit")
+	headerText := "Terraform Plan Viewer"
+	if m.showLogs {
+		headerText = "Terraform Log Viewer"
+	}
+	header := headerStyle.Render(headerText)
+	controls := dimStyle.Render(" ↑↓:navigate  ^u/^d:half-page  q:quit  L:toggle logs")
+	if !m.showLogs {
+		controls += dimStyle.Render("  Enter:expand  e/c:all")
+	}
 	output.WriteString(header + controls + "\n\n")
 
 	// Scroll indicator (top)
@@ -317,6 +349,34 @@ func (m Model) View() string {
 		line := m.lines[i]
 		isSelected := i == m.cursor
 
+		if line.Type == "log" {
+			// Log View
+			content := line.Content
+			// Simple heuristics for coloring
+			var style lipgloss.Style
+			if strings.Contains(content, "Error:") {
+				style = errorStyle
+			} else if strings.Contains(content, "Warning:") {
+				style = warningStyle
+			} else if strings.HasPrefix(content, "Initializing") {
+				style = importStyle
+			} else if strings.Contains(content, "Success!") || strings.Contains(content, "Creation complete") {
+				style = createStyle
+			} else if strings.Contains(content, "Creating...") || strings.Contains(content, "Destruction complete") {
+				style = updateStyle
+			} else {
+				style = defaultStyle
+			}
+
+			if isSelected {
+				output.WriteString(selectedStyle.Render("► " + content) + "\n")
+			} else {
+				output.WriteString("  " + style.Render(content) + "\n")
+			}
+			continue
+		}
+
+		// Plan View (existing logic)
 		switch line.Type {
 		case "diagnostic":
 			diag := m.diagnostics[line.DiagIdx]
@@ -409,7 +469,11 @@ func (m Model) View() string {
 	}
 
 	// Footer with summary
-	output.WriteString("\n" + getSummary(m.resources, m.diagnostics))
+	if !m.showLogs {
+		output.WriteString("\n" + getSummary(m.resources, m.diagnostics))
+	} else {
+		output.WriteString(dimStyle.Render(fmt.Sprintf("\n%d lines", len(m.lines))))
+	}
 
 	return output.String()
 }
@@ -592,10 +656,11 @@ func parseDiagnosticBlock(lines []string, errorPattern, warningPattern *regexp.R
 	}
 }
 
-func parsePlan(reader io.Reader) ([]ResourceChange, []Diagnostic) {
+func parseInput(reader io.Reader) ([]ResourceChange, []Diagnostic, []string) {
 	scanner := bufio.NewScanner(reader)
 	resources := make([]ResourceChange, 0)
 	diagnostics := make([]Diagnostic, 0)
+	logs := make([]string, 0)
 
 	headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
 	errorPattern := regexp.MustCompile(`Error:\s*(.+)`)
@@ -608,7 +673,8 @@ func parsePlan(reader io.Reader) ([]ResourceChange, []Diagnostic) {
 	bracketDepth := 0
 
 	for scanner.Scan() {
-		line := stripANSI(scanner.Text())
+		rawLine := scanner.Text()
+		line := stripANSI(rawLine)
 
 		// Check for diagnostic block start (╷)
 		if strings.HasPrefix(line, "╷") {
@@ -695,6 +761,16 @@ func parsePlan(reader io.Reader) ([]ResourceChange, []Diagnostic) {
 				}
 				inResource = false
 			}
+			continue
+		}
+
+		// If we are here, it's not a resource block line or diagnostic line (that we know of).
+		// Store it in logs.
+		// NOTE: We store the stripped line because our styles are applied on top.
+		// If we want to keep original colors, we'd store rawLine.
+		// Given the request for consistent coloring, let's store stripped line and re-color.
+		if strings.TrimSpace(line) != "" {
+			logs = append(logs, line)
 		}
 	}
 
@@ -702,18 +778,28 @@ func parsePlan(reader io.Reader) ([]ResourceChange, []Diagnostic) {
 		resources = append(resources, *currentResource)
 	}
 
-	return resources, diagnostics
+	return resources, diagnostics, logs
 }
 
 func main() {
-	resources, diagnostics := parsePlan(os.Stdin)
+	resources, diagnostics, logs := parseInput(os.Stdin)
 
-	if len(resources) == 0 && len(diagnostics) == 0 {
-		fmt.Fprintln(os.Stderr, "No resource changes or diagnostics found in plan")
+	if len(resources) == 0 && len(diagnostics) == 0 && len(logs) == 0 {
+		fmt.Fprintln(os.Stderr, "No output found to display")
 		os.Exit(1)
 	}
 
-	m := Model{resources: resources, diagnostics: diagnostics}
+	// Determine initial view mode
+	// If we have resources, show Plan view (false)
+	// If we only have logs (e.g. init), show Log view (true)
+	showLogs := len(resources) == 0 && len(logs) > 0
+
+	m := Model{
+		resources:   resources,
+		diagnostics: diagnostics,
+		logs:        logs,
+		showLogs:    showLogs,
+	}
 	m.rebuildLines()
 
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
