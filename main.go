@@ -15,6 +15,7 @@ import (
 type ResourceChange struct {
 	Address    string
 	Action     string
+	ActionText string // Original text like "will be updated in-place", "must be replaced"
 	Attributes []string
 	Expanded   bool
 }
@@ -46,14 +47,24 @@ type Model struct {
 }
 
 var (
-	createStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))   // Green
-	updateStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))   // Yellow
-	destroyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))   // Red
-	replaceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))   // Magenta
-	importStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))   // Cyan
-	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // Bright red
-	warningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	// Resource header colors (bright/bold for titles)
+	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)   // Green
+	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)   // Yellow
+	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)   // Red
+	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Bold(true)   // Magenta
+	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)   // Cyan
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // Bright red
+	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true) // Orange
+
+	// Attribute colors (dimmer versions for content)
+	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("34"))  // Dim green for +
+	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("124")) // Dim red for -
+	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("136")) // Dim yellow for ~
+	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true) // Bold red for # forces replacement
+
+	// UI colors
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244")) // Gray for comments
+	defaultStyle  = lipgloss.NewStyle()                                    // White/default for unchanged attrs
 	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236"))
 	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 )
@@ -356,7 +367,8 @@ func (m Model) View() string {
 				expandIcon = "▾"
 			}
 
-			content := fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address)
+			// Show full title: address + action text (e.g., "local_file.config must be replaced")
+			content := fmt.Sprintf("%s %s %s %s", expandIcon, symbol, rc.Address, rc.ActionText)
 			if isSelected {
 				content = selectedStyle.Render("► " + content)
 			} else {
@@ -388,26 +400,36 @@ func (m Model) View() string {
 }
 
 func styleAttribute(attr string) string {
-	trimmed := strings.TrimSpace(attr)
-
-	// Check for "unchanged" comments
-	if strings.Contains(trimmed, "unchanged") {
-		return dimStyle.Render(attr)
+	// Check for "# forces replacement" - bold red like Terraform
+	if strings.Contains(attr, "# forces replacement") {
+		idx := strings.Index(attr, "# forces replacement")
+		before := attr[:idx]
+		forces := "# forces replacement"
+		after := attr[idx+len(forces):]
+		// Style the attribute part normally, then forces in bold red
+		return styleAttributePrefix(before) + forcesStyle.Render(forces) + defaultStyle.Render(after)
 	}
+
+	return styleAttributePrefix(attr)
+}
+
+func styleAttributePrefix(attr string) string {
+	trimmed := strings.TrimSpace(attr)
 
 	// Style based on prefix
 	if strings.HasPrefix(trimmed, "+") {
-		return createStyle.Render(attr)
+		return addAttrStyle.Render(attr)
 	} else if strings.HasPrefix(trimmed, "-") {
-		return destroyStyle.Render(attr)
+		return removeAttrStyle.Render(attr)
 	} else if strings.HasPrefix(trimmed, "~") {
-		return updateStyle.Render(attr)
+		return changeAttrStyle.Render(attr)
 	} else if strings.HasPrefix(trimmed, "#") {
+		// Comments in gray
 		return dimStyle.Render(attr)
 	}
 
-	// Default: unchanged attributes shown dimmed
-	return dimStyle.Render(attr)
+	// Unchanged attributes - white/default
+	return defaultStyle.Render(attr)
 }
 
 func getSummary(resources []ResourceChange, diagnostics []Diagnostic) string {
@@ -628,6 +650,7 @@ func parsePlan(reader io.Reader) ([]ResourceChange, []Diagnostic) {
 			currentResource = &ResourceChange{
 				Address:    address,
 				Action:     action,
+				ActionText: actionText,
 				Attributes: make([]string, 0),
 			}
 			continue
