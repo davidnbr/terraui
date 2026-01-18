@@ -19,28 +19,40 @@ type ResourceChange struct {
 	Expanded   bool
 }
 
+type Diagnostic struct {
+	Severity string   // "error" or "warning"
+	Summary  string
+	Detail   []string
+	Expanded bool
+}
+
 // Line represents a single display line
 type Line struct {
-	ResourceIdx int    // Which resource this belongs to
-	AttrIdx     int    // -1 for resource header, >=0 for attribute
-	Content     string // Raw content for attributes
+	Type        string // "resource", "attribute", "diagnostic", "diagnostic_detail"
+	ResourceIdx int    // Which resource this belongs to (-1 if diagnostic)
+	DiagIdx     int    // Which diagnostic this belongs to (-1 if resource)
+	AttrIdx     int    // -1 for headers, >=0 for attribute/detail
+	Content     string // Raw content
 }
 
 type Model struct {
-	resources  []ResourceChange
-	lines      []Line  // All visible lines
-	cursor     int     // Current line index
-	height     int
-	offset     int
-	ready      bool
+	resources   []ResourceChange
+	diagnostics []Diagnostic
+	lines       []Line // All visible lines
+	cursor      int    // Current line index
+	height      int
+	offset      int
+	ready       bool
 }
 
 var (
-	createStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // Green
-	updateStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))  // Yellow
-	destroyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))  // Red
-	replaceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))  // Magenta
-	importStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))  // Cyan
+	createStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))   // Green
+	updateStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))   // Yellow
+	destroyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))   // Red
+	replaceStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))   // Magenta
+	importStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))   // Cyan
+	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // Bright red
+	warningStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // Orange
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236"))
 	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
@@ -53,14 +65,25 @@ func (m Model) Init() tea.Cmd {
 // Rebuild the lines slice based on current expand state
 func (m *Model) rebuildLines() {
 	m.lines = nil
-	for i, rc := range m.resources {
-		// Add resource header line
-		m.lines = append(m.lines, Line{ResourceIdx: i, AttrIdx: -1})
 
-		// Add attribute lines if expanded
+	// Add diagnostics first (errors and warnings)
+	for i, diag := range m.diagnostics {
+		m.lines = append(m.lines, Line{Type: "diagnostic", DiagIdx: i, ResourceIdx: -1, AttrIdx: -1})
+
+		if diag.Expanded {
+			for j, detail := range diag.Detail {
+				m.lines = append(m.lines, Line{Type: "diagnostic_detail", DiagIdx: i, ResourceIdx: -1, AttrIdx: j, Content: detail})
+			}
+		}
+	}
+
+	// Add resources
+	for i, rc := range m.resources {
+		m.lines = append(m.lines, Line{Type: "resource", ResourceIdx: i, DiagIdx: -1, AttrIdx: -1})
+
 		if rc.Expanded {
 			for j := range rc.Attributes {
-				m.lines = append(m.lines, Line{ResourceIdx: i, AttrIdx: j, Content: rc.Attributes[j]})
+				m.lines = append(m.lines, Line{Type: "attribute", ResourceIdx: i, DiagIdx: -1, AttrIdx: j, Content: rc.Attributes[j]})
 			}
 		}
 	}
@@ -142,8 +165,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if m.cursor == clickedLine {
 						// Double-click behavior: if already selected, toggle expand
 						line := m.lines[clickedLine]
-						if line.AttrIdx == -1 {
+						if line.Type == "resource" {
 							m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
+							m.rebuildLines()
+							m.clampCursor()
+							m.clampOffset()
+						} else if line.Type == "diagnostic" {
+							m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
 							m.rebuildLines()
 							m.clampCursor()
 							m.clampOffset()
@@ -174,11 +202,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter", " ":
-			// Toggle expand only if on a resource header line
+			// Toggle expand on header lines
 			if m.cursor < len(m.lines) {
 				line := m.lines[m.cursor]
-				if line.AttrIdx == -1 { // Resource header
+				if line.Type == "resource" {
 					m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
+					m.rebuildLines()
+					m.clampCursor()
+					m.clampOffset()
+				} else if line.Type == "diagnostic" {
+					m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
 					m.rebuildLines()
 					m.clampCursor()
 					m.clampOffset()
@@ -208,6 +241,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for i := range m.resources {
 				m.resources[i].Expanded = true
 			}
+			for i := range m.diagnostics {
+				m.diagnostics[i].Expanded = true
+			}
 			m.rebuildLines()
 			m.clampCursor()
 			m.clampOffset()
@@ -216,6 +252,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Collapse all
 			for i := range m.resources {
 				m.resources[i].Expanded = false
+			}
+			for i := range m.diagnostics {
+				m.diagnostics[i].Expanded = false
 			}
 			m.rebuildLines()
 			m.clampCursor()
@@ -267,8 +306,47 @@ func (m Model) View() string {
 		line := m.lines[i]
 		isSelected := i == m.cursor
 
-		if line.AttrIdx == -1 {
-			// Resource header line
+		switch line.Type {
+		case "diagnostic":
+			diag := m.diagnostics[line.DiagIdx]
+			var style lipgloss.Style
+			var symbol string
+			if diag.Severity == "error" {
+				style = errorStyle
+				symbol = "✗"
+			} else {
+				style = warningStyle
+				symbol = "⚠"
+			}
+
+			expandIcon := "▸"
+			if diag.Expanded {
+				expandIcon = "▾"
+			}
+
+			content := fmt.Sprintf("%s %s %s", expandIcon, symbol, diag.Summary)
+			if isSelected {
+				content = selectedStyle.Render("► " + content)
+			} else {
+				content = "  " + style.Render(content)
+			}
+			output.WriteString(content + "\n")
+
+		case "diagnostic_detail":
+			diag := m.diagnostics[line.DiagIdx]
+			var style lipgloss.Style
+			if diag.Severity == "error" {
+				style = errorStyle
+			} else {
+				style = warningStyle
+			}
+			if isSelected {
+				output.WriteString(selectedStyle.Render("►   " + line.Content) + "\n")
+			} else {
+				output.WriteString("    " + style.Render(line.Content) + "\n")
+			}
+
+		case "resource":
 			rc := m.resources[line.ResourceIdx]
 			symbol := getSymbol(rc.Action)
 			style := getStyleForAction(rc.Action)
@@ -285,8 +363,8 @@ func (m Model) View() string {
 				content = "  " + style.Render(content)
 			}
 			output.WriteString(content + "\n")
-		} else {
-			// Attribute line
+
+		case "attribute":
 			attr := line.Content
 			styledAttr := styleAttribute(attr)
 			if isSelected {
@@ -304,7 +382,7 @@ func (m Model) View() string {
 	}
 
 	// Footer with summary
-	output.WriteString("\n" + getSummary(m.resources))
+	output.WriteString("\n" + getSummary(m.resources, m.diagnostics))
 
 	return output.String()
 }
@@ -332,13 +410,33 @@ func styleAttribute(attr string) string {
 	return dimStyle.Render(attr)
 }
 
-func getSummary(resources []ResourceChange) string {
+func getSummary(resources []ResourceChange, diagnostics []Diagnostic) string {
+	var parts []string
+
+	// Count diagnostics
+	errorCount := 0
+	warningCount := 0
+	for _, d := range diagnostics {
+		if d.Severity == "error" {
+			errorCount++
+		} else {
+			warningCount++
+		}
+	}
+
+	if errorCount > 0 {
+		parts = append(parts, errorStyle.Render(fmt.Sprintf("✗%d error", errorCount)))
+	}
+	if warningCount > 0 {
+		parts = append(parts, warningStyle.Render(fmt.Sprintf("⚠%d warning", warningCount)))
+	}
+
+	// Count resource changes
 	counts := make(map[string]int)
 	for _, r := range resources {
 		counts[r.Action]++
 	}
 
-	var parts []string
 	if c := counts["create"]; c > 0 {
 		parts = append(parts, createStyle.Render(fmt.Sprintf("+%d create", c)))
 	}
@@ -401,19 +499,70 @@ func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
-func parsePlan(reader io.Reader) []ResourceChange {
+func parsePlan(reader io.Reader) ([]ResourceChange, []Diagnostic) {
 	scanner := bufio.NewScanner(reader)
 	resources := make([]ResourceChange, 0)
+	diagnostics := make([]Diagnostic, 0)
 
 	headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
+	errorPattern := regexp.MustCompile(`^│\s*Error:\s*(.+)$`)
+	warningPattern := regexp.MustCompile(`^│\s*Warning:\s*(.+)$`)
 
 	var currentResource *ResourceChange
+	var currentDiag *Diagnostic
 	inResource := false
+	inDiagnostic := false
 	bracketDepth := 0
 
 	for scanner.Scan() {
 		line := stripANSI(scanner.Text())
 
+		// Check for diagnostic block start (╷)
+		if strings.HasPrefix(line, "╷") {
+			inDiagnostic = true
+			continue
+		}
+
+		// Check for diagnostic block end (╵)
+		if strings.HasPrefix(line, "╵") {
+			if currentDiag != nil {
+				diagnostics = append(diagnostics, *currentDiag)
+				currentDiag = nil
+			}
+			inDiagnostic = false
+			continue
+		}
+
+		// Parse error/warning inside diagnostic block
+		if inDiagnostic {
+			if match := errorPattern.FindStringSubmatch(line); match != nil {
+				currentDiag = &Diagnostic{
+					Severity: "error",
+					Summary:  match[1],
+					Detail:   make([]string, 0),
+				}
+				continue
+			}
+			if match := warningPattern.FindStringSubmatch(line); match != nil {
+				currentDiag = &Diagnostic{
+					Severity: "warning",
+					Summary:  match[1],
+					Detail:   make([]string, 0),
+				}
+				continue
+			}
+			// Capture detail lines
+			if currentDiag != nil && strings.HasPrefix(line, "│") {
+				detail := strings.TrimPrefix(line, "│")
+				detail = strings.TrimSpace(detail)
+				if detail != "" {
+					currentDiag.Detail = append(currentDiag.Detail, detail)
+				}
+			}
+			continue
+		}
+
+		// Check for resource header
 		if match := headerPattern.FindStringSubmatch(line); match != nil {
 			if currentResource != nil {
 				resources = append(resources, *currentResource)
@@ -475,18 +624,18 @@ func parsePlan(reader io.Reader) []ResourceChange {
 		resources = append(resources, *currentResource)
 	}
 
-	return resources
+	return resources, diagnostics
 }
 
 func main() {
-	resources := parsePlan(os.Stdin)
+	resources, diagnostics := parsePlan(os.Stdin)
 
-	if len(resources) == 0 {
-		fmt.Fprintln(os.Stderr, "No resource changes found in plan")
+	if len(resources) == 0 && len(diagnostics) == 0 {
+		fmt.Fprintln(os.Stderr, "No resource changes or diagnostics found in plan")
 		os.Exit(1)
 	}
 
-	m := Model{resources: resources}
+	m := Model{resources: resources, diagnostics: diagnostics}
 	m.rebuildLines()
 
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
