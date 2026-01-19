@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/creack/pty"
 )
 
 type ResourceChange struct {
@@ -22,7 +24,7 @@ type ResourceChange struct {
 }
 
 type Diagnostic struct {
-	Severity string   // "error" or "warning"
+	Severity string // "error" or "warning"
 	Summary  string
 	Detail   []string
 	Expanded bool
@@ -65,7 +67,7 @@ var streamChan = make(chan StreamMsg)
 func doRead(reader io.Reader) tea.Msg {
 	go func() {
 		scanner := bufio.NewScanner(reader)
-		
+
 		headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
 		errorPattern := regexp.MustCompile(`Error:\s*(.+)`)
 		warningPattern := regexp.MustCompile(`Warning:\s*(.+)`)
@@ -116,11 +118,16 @@ func doRead(reader io.Reader) tea.Msg {
 				actionText := match[2]
 				var action string
 				switch actionText {
-				case "will be created": action = "create"
-				case "will be updated in-place": action = "update"
-				case "will be destroyed": action = "destroy"
-				case "must be replaced": action = "replace"
-				case "will be imported": action = "import"
+				case "will be created":
+					action = "create"
+				case "will be updated in-place":
+					action = "update"
+				case "will be destroyed":
+					action = "destroy"
+				case "must be replaced":
+					action = "replace"
+				case "will be imported":
+					action = "import"
 				}
 
 				currentResource = &ResourceChange{
@@ -198,6 +205,9 @@ type Model struct {
 	autoScroll  bool
 	done        bool
 	needsSync   bool // Optimization flag
+
+	ptyFile   *os.File // Handle to the PTY (if in Exec mode)
+	inputMode bool     // Are we forwarding input to PTY?
 }
 
 // Styles
@@ -205,29 +215,39 @@ var (
 	// Headers
 	headerPlanStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1) // Blue Bg
 	headerLogStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1) // Mauve Bg
-	
-	// Existing styles...
-	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true)
-	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true)
-	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true)
-	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true)
-	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true)
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true)
-	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true)
+	inputModeStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1) // Green for Input
 
-	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))
-	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555"))
-	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))
-	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true)
+	// Resource header colors (Catppuccin Mocha + Vibrant Red)
+	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true) // Green
+	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true) // Yellow
+	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
+	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true) // Mauve
+	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true) // Sky
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
+	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true) // Peach
 
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c"))
-	defaultStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))
-	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#45475a"))
+	// Attribute colors
+	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))            // Green
+	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555"))            // Vibrant Red
+	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))            // Yellow
+	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
+
+	// UI colors
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c"))            // Overlay1
+	defaultStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))            // Text
+	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#45475a")) // Surface1
 )
 
 func (m Model) Init() tea.Cmd {
+	// If we have a PTY, we are responsible for closing it eventually,
+	// but mostly we just read from it until EOF.
+	var reader io.Reader = os.Stdin
+	if m.ptyFile != nil {
+		reader = m.ptyFile
+	}
+
 	return tea.Batch(
-		readInput(os.Stdin),
+		readInput(reader),
 		waitForActivity(),
 		tickCmd(),
 	)
@@ -348,7 +368,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logs = append(m.logs, *msg.LogLine)
 			m.needsSync = true
 		}
-		
+
 		return m, waitForActivity()
 
 	case tea.WindowSizeMsg:
@@ -370,7 +390,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible()
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionPress {
-				headerOffset := 2 
+				headerOffset := 2
 				if m.offset > 0 {
 					headerOffset = 3
 				}
@@ -381,15 +401,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if !m.showLogs {
 							if line.Type == "resource" {
 								m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
-							m.rebuildLines()
-							m.clampCursor()
-							m.clampOffset()
-						} else if line.Type == "diagnostic" {
-							m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
-							m.rebuildLines()
-							m.clampCursor()
-							m.clampOffset()
-						}
+								m.rebuildLines()
+								m.clampCursor()
+								m.clampOffset()
+							} else if line.Type == "diagnostic" {
+								m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
+								m.rebuildLines()
+								m.clampCursor()
+								m.clampOffset()
+							}
 						}
 					} else {
 						m.cursor = clickedLine
@@ -401,15 +421,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		m.autoScroll = false
+
+		// INPUT MODE LOGIC
+		if m.inputMode && m.ptyFile != nil {
+			if msg.Type == tea.KeyEsc {
+				m.inputMode = false
+				return m, nil
+			}
+			// Forward input to PTY
+			var payload []byte
+			switch msg.Type {
+			case tea.KeyRunes:
+				payload = []byte(string(msg.Runes))
+			case tea.KeyEnter:
+				payload = []byte("\n")
+			case tea.KeySpace:
+				payload = []byte(" ")
+			case tea.KeyBackspace, tea.KeyDelete:
+				payload = []byte{8} // Simple backspace
+			default:
+				// Forward raw bytes if available, or ignore special keys for now
+				// Simple implementation: just text and enter
+			}
+			if len(payload) > 0 {
+				m.ptyFile.Write(payload)
+			}
+			return m, nil
+		}
+
+		// NORMAL NAVIGATION MODE
 		switch msg.String() {
 		case "q", "ctrl+c":
+			if m.ptyFile != nil {
+				// If wrapping, maybe kill process?
+				// For now, just quit UI. The PTY closure usually kills child.
+			}
 			return m, tea.Quit
+
+		case "i":
+			if m.ptyFile != nil {
+				m.inputMode = true
+				return m, nil
+			}
 
 		case "l", "L":
 			m.showLogs = !m.showLogs
 			m.rebuildLines()
 			m.cursor = 0
 			m.offset = 0
+			m.autoScroll = false // Manual toggle stops autoscroll usually
 			return m, nil
 
 		case "up", "k":
@@ -514,18 +574,27 @@ func (m Model) View() string {
 
 	// Enhanced Header
 	var header string
-	if m.showLogs {
+	if m.inputMode {
+		header = inputModeStyle.Render("INPUT") + " " + dimStyle.Render("Interactive Mode - Type to send")
+	} else if m.showLogs {
 		header = headerLogStyle.Render("LOGS") + " " + dimStyle.Render("Terraform Output")
 	} else {
 		header = headerPlanStyle.Render("PLAN") + " " + dimStyle.Render("Terraform Viewer")
 	}
-	
+
 	status := ""
 	if !m.done {
 		status = dimStyle.Render(" ● Live")
 	}
 
 	controls := dimStyle.Render(" ↑↓:navigate  q:quit  L:toggle mode")
+	if m.ptyFile != nil {
+		if m.inputMode {
+			controls += dimStyle.Render("  Esc:exit input")
+		} else {
+			controls += dimStyle.Render("  i:enter input")
+		}
+	}
 	output.WriteString(header + status + "  " + controls + "\n\n")
 
 	if startLine > 0 {
@@ -556,7 +625,7 @@ func (m Model) View() string {
 			}
 
 			if isSelected {
-				output.WriteString(selectedStyle.Render("► " + content) + "\n")
+				output.WriteString(selectedStyle.Render("► "+content) + "\n")
 			} else {
 				output.WriteString("  " + style.Render(content) + "\n")
 			}
@@ -597,7 +666,7 @@ func (m Model) View() string {
 				style = warningStyle
 			}
 			if isSelected {
-				output.WriteString(selectedStyle.Render("►   " + line.Content) + "\n")
+				output.WriteString(selectedStyle.Render("►   "+line.Content) + "\n")
 			} else {
 				output.WriteString("    " + style.Render(line.Content) + "\n")
 			}
@@ -628,7 +697,7 @@ func (m Model) View() string {
 			attr := line.Content
 			styledAttr := styleAttribute(attr)
 			if isSelected {
-				output.WriteString(selectedStyle.Render("►   " + attr) + "\n")
+				output.WriteString(selectedStyle.Render("►   "+attr) + "\n")
 			} else {
 				output.WriteString("    " + styledAttr + "\n")
 			}
@@ -765,7 +834,7 @@ func getStyleForAction(action string) lipgloss.Style {
 	}
 }
 
-var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`) // Note: Backslash needs to be escaped in JSON string
 
 func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
@@ -828,10 +897,32 @@ func parseDiagnosticBlock(lines []string, errorPattern, warningPattern *regexp.R
 }
 
 func main() {
+	var ptyFile *os.File
+
+	// 1. Interactive Mode: terraui terraform apply ...
+	if len(os.Args) > 1 {
+		// Run command in PTY
+		cmd := exec.Command(os.Args[1], os.Args[2:]...)
+		var err error
+		ptyFile, err = pty.Start(cmd)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting PTY: %v\n", err)
+			os.Exit(1)
+		}
+		defer func() {
+			ptyFile.Close() // Best effort close
+			cmd.Process.Kill()
+		}()
+	}
+
+	// 2. Default Mode: Pipe input
+	// If ptyFile is nil, Model will use os.Stdin
+
 	// Default: Show logs initially, autoscroll on
 	m := Model{
-		showLogs:   true, 
+		showLogs:   true,
 		autoScroll: true,
+		ptyFile:    ptyFile,
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
