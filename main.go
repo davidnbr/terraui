@@ -340,7 +340,7 @@ func (m *Model) ensureCursorVisible() {
 
 	// Adjust visible height if we are showing a pinned prompt
 	if m.prompt != "" {
-		visibleHeight -= 2 // Newline + Prompt line
+		visibleHeight -= 2
 	}
 
 	if m.cursor < m.offset {
@@ -468,43 +468,67 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autoScroll = false
 
 		// INPUT MODE LOGIC
+
 		if m.inputMode && m.ptyFile != nil {
+
 			if msg.Type == tea.KeyEsc {
+
 				m.inputMode = false
+
 				return m, nil
+
 			}
 
-			// Local Echo Logic
+			// LINE BUFFERING MODE
+
+			// We buffer input locally and only send on Enter.
+
+			// This prevents PTY echo artifacts and allows local editing (backspace) before sending.
+
 			switch msg.Type {
+
+			case tea.KeyCtrlC:
+
+				// Send interrupt immediately
+
+				m.ptyFile.Write([]byte{3})
+
+				return m, tea.Quit
+
 			case tea.KeyBackspace, tea.KeyDelete:
+
 				if len(m.userInput) > 0 {
+
 					m.userInput = m.userInput[:len(m.userInput)-1]
+
 				}
+
 			case tea.KeyRunes:
+
 				m.userInput += string(msg.Runes)
+
 			case tea.KeySpace:
+
 				m.userInput += " "
+
 			case tea.KeyEnter:
-				m.userInput = "" // Clear on enter
-				m.prompt = ""    // Assume prompt is satisfied
+
+				// Flush buffer to PTY
+
+				payload := []byte(m.userInput + "\n")
+
+				m.ptyFile.Write(payload)
+
+				// Reset state
+
+				m.userInput = ""
+
+				m.prompt = "" // Optimistically hide prompt until new one appears
+
 			}
 
-			// Forward input to PTY
-			var payload []byte
-			switch msg.Type {
-			case tea.KeyRunes:
-				payload = []byte(string(msg.Runes))
-			case tea.KeyEnter:
-				payload = []byte("\n")
-			case tea.KeySpace:
-				payload = []byte(" ")
-			case tea.KeyBackspace, tea.KeyDelete:
-				payload = []byte{8}
-			}
-			if len(payload) > 0 {
-				m.ptyFile.Write(payload)
-			}
 			return m, nil
+
 		}
 
 		// NORMAL NAVIGATION MODE
@@ -634,12 +658,7 @@ func (m Model) View() string {
 	// Header Logic
 	var header string
 	if m.inputMode {
-		// Show local echo in header
-		inputDisplay := m.userInput
-		if inputDisplay == "" {
-			inputDisplay = "(type here)"
-		}
-		header = inputModeStyle.Render("INPUT") + " " + dimStyle.Render("Typing: ") + createStyle.Render(inputDisplay)
+		header = inputModeStyle.Render("INPUT") + " " + dimStyle.Render("Interactive Mode")
 	} else if m.showLogs {
 		header = headerLogStyle.Render("LOGS") + " " + dimStyle.Render("Terraform Output")
 	} else {
@@ -647,8 +666,12 @@ func (m Model) View() string {
 	}
 
 	status := ""
-	if !m.done {
+	if m.prompt != "" {
+		status = warningStyle.Render(" ● WAITING FOR INPUT")
+	} else if !m.done {
 		status = dimStyle.Render(" ● Live")
+	} else {
+		status = dimStyle.Render(" ● Done")
 	}
 
 	controls := dimStyle.Render(" ↑↓:navigate  q:quit  L:mode")
@@ -661,6 +684,7 @@ func (m Model) View() string {
 	}
 	output.WriteString(header + status + "  " + controls + "\n\n")
 
+	// ... (Rest of View logic remains exactly the same)
 	if startLine > 0 {
 		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines above\n", startLine)))
 	}
@@ -681,7 +705,7 @@ func (m Model) View() string {
 			} else if strings.Contains(content, "Success!") || strings.Contains(content, "Creation complete") || strings.Contains(content, "Complete!") {
 				style = createStyle
 			} else if strings.Contains(content, "Enter a value:") {
-				style = forcesStyle // Highlight prompts
+				style = forcesStyle
 			} else if strings.Contains(content, "Creating...") || strings.Contains(content, "Destruction complete") {
 				style = updateStyle
 			} else {
@@ -696,7 +720,6 @@ func (m Model) View() string {
 			continue
 		}
 
-		// Resource View
 		switch line.Type {
 		case "diagnostic":
 			diag := m.diagnostics[line.DiagIdx]
@@ -775,7 +798,12 @@ func (m Model) View() string {
 
 	// Pinned Prompt
 	if m.prompt != "" {
-		output.WriteString("\n" + promptStyle.Render(">> "+m.prompt))
+		promptLine := promptStyle.Render(">> " + m.prompt)
+		if m.inputMode {
+			// Show typing inline
+			promptLine += " " + createStyle.Render(m.userInput) + dimStyle.Render("█")
+		}
+		output.WriteString("\n" + promptLine)
 	}
 
 	if !m.showLogs {
