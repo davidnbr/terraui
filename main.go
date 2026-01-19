@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +42,7 @@ type StreamMsg struct {
 	Resource   *ResourceChange
 	Diagnostic *Diagnostic
 	LogLine    *string
+	Prompt     *string // New: Partial line that looks like a prompt
 	Done       bool
 }
 
@@ -64,13 +64,19 @@ func readInput(reader io.Reader) tea.Cmd {
 // Channel to coordinate the scanner goroutine
 var streamChan = make(chan StreamMsg)
 
+// Optimization: Pre-compile regexes
+var (
+	headerPattern  = regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
+	errorPattern   = regexp.MustCompile(`Error:\s*(.+)`)
+	warningPattern = regexp.MustCompile(`Warning:\s*(.+)`)
+	promptPattern  = regexp.MustCompile(`Enter a value:\s*$`) // Detect prompt at end of buffer
+)
+
 func doRead(reader io.Reader) tea.Msg {
 	go func() {
-		scanner := bufio.NewScanner(reader)
-
-		headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
-		errorPattern := regexp.MustCompile(`Error:\s*(.+)`)
-		warningPattern := regexp.MustCompile(`Warning:\s*(.+)`)
+		// Use a larger buffer and manual processing to catch prompts (which don't end in \n)
+		buf := make([]byte, 4096)
+		var lineBuffer string
 
 		var currentResource *ResourceChange
 		var diagLines []string
@@ -78,15 +84,14 @@ func doRead(reader io.Reader) tea.Msg {
 		inDiagnostic := false
 		bracketDepth := 0
 
-		for scanner.Scan() {
-			rawLine := scanner.Text()
+		processLine := func(rawLine string) {
 			line := stripANSI(rawLine)
 
 			// Diagnostic handling
 			if strings.HasPrefix(line, "╷") {
 				inDiagnostic = true
 				diagLines = make([]string, 0)
-				continue
+				return
 			}
 			if strings.HasPrefix(line, "╵") {
 				if inDiagnostic && len(diagLines) > 0 {
@@ -97,23 +102,21 @@ func doRead(reader io.Reader) tea.Msg {
 				}
 				diagLines = nil
 				inDiagnostic = false
-				continue
+				return
 			}
 			if inDiagnostic {
 				content := strings.TrimPrefix(line, "│")
 				diagLines = append(diagLines, content)
-				continue
+				return
 			}
 
 			// Resource Header
 			if match := headerPattern.FindStringSubmatch(line); match != nil {
 				if currentResource != nil {
-					// Flush previous resource
 					res := *currentResource
 					streamChan <- StreamMsg{Resource: &res}
 					currentResource = nil
 				}
-
 				address := match[1]
 				actionText := match[2]
 				var action string
@@ -129,33 +132,30 @@ func doRead(reader io.Reader) tea.Msg {
 				case "will be imported":
 					action = "import"
 				}
-
 				currentResource = &ResourceChange{
 					Address:    address,
 					Action:     action,
 					ActionText: actionText,
 					Attributes: make([]string, 0),
 				}
-				continue
+				return
 			}
 
 			// Resource Body
 			if currentResource != nil && strings.Contains(line, " resource \"") {
 				inResource = true
 				bracketDepth = strings.Count(line, "{") - strings.Count(line, "}")
-				continue
+				return
 			}
 			if inResource {
 				bracketDepth += strings.Count(line, "{")
 				bracketDepth -= strings.Count(line, "}")
-
 				if currentResource != nil && !strings.Contains(line, " resource \"") {
 					trimmed := strings.TrimSpace(line)
 					if trimmed != "" && trimmed != "{" && trimmed != "}" {
 						currentResource.Attributes = append(currentResource.Attributes, trimmed)
 					}
 				}
-
 				if bracketDepth == 0 && strings.Contains(line, "}") {
 					if currentResource != nil {
 						res := *currentResource
@@ -164,14 +164,45 @@ func doRead(reader io.Reader) tea.Msg {
 					}
 					inResource = false
 				}
-				continue
+				return
 			}
 
-			// If not captured above, it's a log line
-			// We send stripped line for consistent styling
+			// Generic Log
 			if strings.TrimSpace(line) != "" {
 				l := line
 				streamChan <- StreamMsg{LogLine: &l}
+			}
+		}
+
+		for {
+			n, err := reader.Read(buf)
+			if n > 0 {
+				chunk := string(buf[:n])
+				lineBuffer += chunk
+
+				// Process complete lines
+				for {
+					idx := strings.Index(lineBuffer, "\n")
+					if idx == -1 {
+						break
+					}
+					line := lineBuffer[:idx]
+					lineBuffer = lineBuffer[idx+1:]
+					// Strip \r if present (common in PTY)
+					line = strings.TrimSuffix(line, "\r")
+					processLine(line)
+				}
+
+				// Check remaining buffer for Prompt (no newline)
+				cleanBuffer := stripANSI(lineBuffer)
+				if promptPattern.MatchString(cleanBuffer) {
+					p := strings.TrimSpace(cleanBuffer)
+					streamChan <- StreamMsg{Prompt: &p}
+					// We don't clear lineBuffer; we'll process it when the user hits Enter (and \n comes)
+				}
+			}
+			if err != nil {
+				break
 			}
 		}
 
@@ -182,8 +213,7 @@ func doRead(reader io.Reader) tea.Msg {
 
 		streamChan <- StreamMsg{Done: true}
 	}()
-
-	return nil // The command just starts the goroutine
+	return nil
 }
 
 func waitForActivity() tea.Cmd {
@@ -204,15 +234,16 @@ type Model struct {
 	showLogs    bool
 	autoScroll  bool
 	done        bool
-	needsSync   bool // Optimization flag
+	needsSync   bool
 
-	ptyFile   *os.File // Handle to the PTY (if in Exec mode)
-	inputMode bool     // Are we forwarding input to PTY?
+	ptyFile   *os.File
+	inputMode bool
+	userInput string // Local echo of what user is typing
+	prompt    string // Active prompt detected from stream
 }
 
 // Styles
 var (
-	// Headers
 	headerPlanStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1) // Blue Bg
 	headerLogStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1) // Mauve Bg
 	inputModeStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1) // Green for Input
@@ -225,6 +256,7 @@ var (
 	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true) // Sky
 	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
 	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true) // Peach
+	promptStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true) // Pink/Fuchsia for prompts
 
 	// Attribute colors
 	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))            // Green
@@ -258,7 +290,6 @@ func (m *Model) rebuildLines() {
 	m.lines = nil
 
 	if m.showLogs {
-		// Log View
 		for i, log := range m.logs {
 			m.lines = append(m.lines, Line{Type: "log", Content: log, AttrIdx: i})
 		}
@@ -307,6 +338,11 @@ func (m *Model) ensureCursorVisible() {
 		visibleHeight = 5
 	}
 
+	// Adjust visible height if we are showing a pinned prompt
+	if m.prompt != "" {
+		visibleHeight -= 2 // Newline + Prompt line
+	}
+
 	if m.cursor < m.offset {
 		m.offset = m.cursor
 	} else if m.cursor >= m.offset+visibleHeight {
@@ -320,6 +356,11 @@ func (m *Model) clampOffset() {
 	visibleHeight := m.height - 6
 	if visibleHeight < 5 {
 		visibleHeight = 5
+	}
+
+	// Adjust visible height if we are showing a pinned prompt
+	if m.prompt != "" {
+		visibleHeight -= 2
 	}
 
 	if m.offset < 0 {
@@ -366,6 +407,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.LogLine != nil {
 			m.logs = append(m.logs, *msg.LogLine)
+			m.needsSync = true
+		}
+		if msg.Prompt != nil {
+			m.prompt = *msg.Prompt
 			m.needsSync = true
 		}
 
@@ -428,6 +473,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.inputMode = false
 				return m, nil
 			}
+
+			// Local Echo Logic
+			switch msg.Type {
+			case tea.KeyBackspace, tea.KeyDelete:
+				if len(m.userInput) > 0 {
+					m.userInput = m.userInput[:len(m.userInput)-1]
+				}
+			case tea.KeyRunes:
+				m.userInput += string(msg.Runes)
+			case tea.KeySpace:
+				m.userInput += " "
+			case tea.KeyEnter:
+				m.userInput = "" // Clear on enter
+				m.prompt = ""    // Assume prompt is satisfied
+			}
+
 			// Forward input to PTY
 			var payload []byte
 			switch msg.Type {
@@ -438,10 +499,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeySpace:
 				payload = []byte(" ")
 			case tea.KeyBackspace, tea.KeyDelete:
-				payload = []byte{8} // Simple backspace
-			default:
-				// Forward raw bytes if available, or ignore special keys for now
-				// Simple implementation: just text and enter
+				payload = []byte{8}
 			}
 			if len(payload) > 0 {
 				m.ptyFile.Write(payload)
@@ -452,10 +510,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// NORMAL NAVIGATION MODE
 		switch msg.String() {
 		case "q", "ctrl+c":
-			if m.ptyFile != nil {
-				// If wrapping, maybe kill process?
-				// For now, just quit UI. The PTY closure usually kills child.
-			}
 			return m, tea.Quit
 
 		case "i":
@@ -469,7 +523,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rebuildLines()
 			m.cursor = 0
 			m.offset = 0
-			m.autoScroll = false // Manual toggle stops autoscroll usually
+			m.autoScroll = false
 			return m, nil
 
 		case "up", "k":
@@ -558,6 +612,11 @@ func (m Model) View() string {
 		visibleHeight = 5
 	}
 
+	// Calculate if we need to reserve space for the pinned prompt
+	if m.prompt != "" {
+		visibleHeight -= 2 // Newline + Prompt line
+	}
+
 	startLine := m.offset
 	endLine := startLine + visibleHeight
 	if startLine > len(m.lines) {
@@ -572,10 +631,15 @@ func (m Model) View() string {
 
 	var output strings.Builder
 
-	// Enhanced Header
+	// Header Logic
 	var header string
 	if m.inputMode {
-		header = inputModeStyle.Render("INPUT") + " " + dimStyle.Render("Interactive Mode - Type to send")
+		// Show local echo in header
+		inputDisplay := m.userInput
+		if inputDisplay == "" {
+			inputDisplay = "(type here)"
+		}
+		header = inputModeStyle.Render("INPUT") + " " + dimStyle.Render("Typing: ") + createStyle.Render(inputDisplay)
 	} else if m.showLogs {
 		header = headerLogStyle.Render("LOGS") + " " + dimStyle.Render("Terraform Output")
 	} else {
@@ -587,7 +651,7 @@ func (m Model) View() string {
 		status = dimStyle.Render(" ● Live")
 	}
 
-	controls := dimStyle.Render(" ↑↓:navigate  q:quit  L:toggle mode")
+	controls := dimStyle.Render(" ↑↓:navigate  q:quit  L:mode")
 	if m.ptyFile != nil {
 		if m.inputMode {
 			controls += dimStyle.Render("  Esc:exit input")
@@ -707,6 +771,11 @@ func (m Model) View() string {
 	remaining := len(m.lines) - endLine
 	if remaining > 0 {
 		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines below\n", remaining)))
+	}
+
+	// Pinned Prompt
+	if m.prompt != "" {
+		output.WriteString("\n" + promptStyle.Render(">> "+m.prompt))
 	}
 
 	if !m.showLogs {
