@@ -512,23 +512,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.userInput += " "
 
 			case tea.KeyEnter:
-
 				// Flush buffer to PTY
-
 				payload := []byte(m.userInput + "\n")
-
 				m.ptyFile.Write(payload)
 
 				// Reset state
-
 				m.userInput = ""
-
 				m.prompt = "" // Optimistically hide prompt until new one appears
 
+				// UX: Automatically exit input mode and switch to logs to follow progress
+				m.inputMode = false
+				m.showLogs = true
+				m.autoScroll = true
+				m.rebuildLines() // Force immediate UI refresh to show mode change
 			}
 
 			return m, nil
-
 		}
 
 		// NORMAL NAVIGATION MODE
