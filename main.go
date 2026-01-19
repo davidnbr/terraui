@@ -29,50 +29,196 @@ type Diagnostic struct {
 
 // Line represents a single display line
 type Line struct {
-	Type        string // "resource", "attribute", "diagnostic", "diagnostic_detail"
+	Type        string // "resource", "attribute", "diagnostic", "diagnostic_detail", "log"
 	ResourceIdx int    // Which resource this belongs to (-1 if diagnostic)
 	DiagIdx     int    // Which diagnostic this belongs to (-1 if resource)
 	AttrIdx     int    // -1 for headers, >=0 for attribute/detail
 	Content     string // Raw content
 }
 
+type StreamMsg struct {
+	Resource   *ResourceChange
+	Diagnostic *Diagnostic
+	LogLine    *string
+	Done       bool
+}
+
+func readInput(reader io.Reader) tea.Cmd {
+	return func() tea.Msg {
+		return doRead(reader)
+	}
+}
+
+// Channel to coordinate the scanner goroutine
+var streamChan = make(chan StreamMsg)
+
+func doRead(reader io.Reader) tea.Msg {
+	go func() {
+		scanner := bufio.NewScanner(reader)
+		
+		headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
+		errorPattern := regexp.MustCompile(`Error:\s*(.+)`)
+		warningPattern := regexp.MustCompile(`Warning:\s*(.+)`)
+
+		var currentResource *ResourceChange
+		var diagLines []string
+		inResource := false
+		inDiagnostic := false
+		bracketDepth := 0
+
+		for scanner.Scan() {
+			rawLine := scanner.Text()
+			line := stripANSI(rawLine)
+
+			// Diagnostic handling
+			if strings.HasPrefix(line, "╷") {
+				inDiagnostic = true
+				diagLines = make([]string, 0)
+				continue
+			}
+			if strings.HasPrefix(line, "╵") {
+				if inDiagnostic && len(diagLines) > 0 {
+					diag := parseDiagnosticBlock(diagLines, errorPattern, warningPattern)
+					if diag != nil {
+						streamChan <- StreamMsg{Diagnostic: diag}
+					}
+				}
+				diagLines = nil
+				inDiagnostic = false
+				continue
+			}
+			if inDiagnostic {
+				content := strings.TrimPrefix(line, "│")
+				diagLines = append(diagLines, content)
+				continue
+			}
+
+			// Resource Header
+			if match := headerPattern.FindStringSubmatch(line); match != nil {
+				if currentResource != nil {
+					// Flush previous resource
+					res := *currentResource
+					streamChan <- StreamMsg{Resource: &res}
+					currentResource = nil
+				}
+
+				address := match[1]
+				actionText := match[2]
+				var action string
+				switch actionText {
+				case "will be created": action = "create"
+				case "will be updated in-place": action = "update"
+				case "will be destroyed": action = "destroy"
+				case "must be replaced": action = "replace"
+				case "will be imported": action = "import"
+				}
+
+				currentResource = &ResourceChange{
+					Address:    address,
+					Action:     action,
+					ActionText: actionText,
+					Attributes: make([]string, 0),
+				}
+				continue
+			}
+
+			// Resource Body
+			if currentResource != nil && strings.Contains(line, " resource \"") {
+				inResource = true
+				bracketDepth = strings.Count(line, "{") - strings.Count(line, "}")
+				continue
+			}
+			if inResource {
+				bracketDepth += strings.Count(line, "{")
+				bracketDepth -= strings.Count(line, "}")
+
+				if currentResource != nil && !strings.Contains(line, " resource \"") {
+					trimmed := strings.TrimSpace(line)
+					if trimmed != "" && trimmed != "{" && trimmed != "}" {
+						currentResource.Attributes = append(currentResource.Attributes, trimmed)
+					}
+				}
+
+				if bracketDepth == 0 && strings.Contains(line, "}") {
+					if currentResource != nil {
+						res := *currentResource
+						streamChan <- StreamMsg{Resource: &res}
+						currentResource = nil
+					}
+					inResource = false
+				}
+				continue
+			}
+
+			// If not captured above, it's a log line
+			// We send stripped line for consistent styling
+			if strings.TrimSpace(line) != "" {
+				l := line
+				streamChan <- StreamMsg{LogLine: &l}
+			}
+		}
+
+		if currentResource != nil {
+			res := *currentResource
+			streamChan <- StreamMsg{Resource: &res}
+		}
+
+		streamChan <- StreamMsg{Done: true}
+	}()
+
+	return nil // The command just starts the goroutine
+}
+
+func waitForActivity() tea.Cmd {
+	return func() tea.Msg {
+		return <-streamChan
+	}
+}
+
 type Model struct {
 	resources   []ResourceChange
 	diagnostics []Diagnostic
-	logs        []string // Generic logs (init, apply progress, etc.)
-	lines       []Line   // All visible lines
-	cursor      int      // Current line index
+	logs        []string
+	lines       []Line
+	cursor      int
 	height      int
 	offset      int
 	ready       bool
-	showLogs    bool // Toggle between Plan and Log view
+	showLogs    bool
+	autoScroll  bool // Follow output
+	done        bool
 }
 
+// Styles
 var (
-	// Resource header colors (Catppuccin Mocha + Vibrant Red)
-	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true) // Green
-	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true) // Yellow
-	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
-	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true) // Mauve
-	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true) // Sky
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
-	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true) // Peach
+	// Headers
+	headerPlanStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1) // Blue Bg
+	headerLogStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1) // Mauve Bg
+	
+	// Existing styles...
+	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true)
+	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true)
+	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true)
+	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true)
+	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true)
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true)
+	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true)
 
-	// Attribute colors
-	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")) // Green
-	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")) // Vibrant Red
-	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")) // Yellow
-	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
+	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))
+	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555"))
+	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))
+	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true)
 
-	// UI colors
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")) // Overlay1
-	defaultStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")) // Text
-	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#45475a")) // Surface1
-	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#89b4fa")) // Blue
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c"))
+	defaultStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))
+	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#45475a"))
 )
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	return tea.Batch(
+		readInput(os.Stdin),
+		waitForActivity(),
+	)
 }
 
 // Rebuild the lines slice based on current expand state
@@ -158,6 +304,36 @@ func (m *Model) clampOffset() {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case StreamMsg:
+		if msg.Done {
+			m.done = true
+			return m, nil
+		}
+
+		if msg.Resource != nil {
+			m.resources = append(m.resources, *msg.Resource)
+			// Automatically switch to Plan view if we see resources
+			m.showLogs = false
+		}
+		if msg.Diagnostic != nil {
+			m.diagnostics = append(m.diagnostics, *msg.Diagnostic)
+		}
+		if msg.LogLine != nil {
+			m.logs = append(m.logs, *msg.LogLine)
+			// If we are in Log mode and autoscroll is on (or we are at bottom), scroll
+		}
+
+		m.rebuildLines()
+		
+		// Auto-scroll logic
+		if m.autoScroll || (!m.ready) { // Always autoscroll if not ready/interacting yet
+			m.cursor = len(m.lines) - 1
+			m.clampCursor()
+			m.ensureCursorVisible()
+		}
+
+		return m, waitForActivity()
+
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		m.ready = true
@@ -166,6 +342,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
+		m.autoScroll = false // Disable autoscroll on interaction
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			m.cursor -= 3
@@ -177,28 +354,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible()
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionPress {
-				// Calculate which line was clicked (accounting for header and scroll indicator)
-				headerOffset := 2 // Header + empty line
+				headerOffset := 2 
 				if m.offset > 0 {
-					headerOffset = 3 // +1 for "more above" indicator
+					headerOffset = 3
 				}
 				clickedLine := m.offset + msg.Y - headerOffset
 				if msg.Y >= headerOffset && clickedLine >= 0 && clickedLine < len(m.lines) {
 					if m.cursor == clickedLine {
-						// Double-click behavior: if already selected, toggle expand (only in Plan view)
 						line := m.lines[clickedLine]
 						if !m.showLogs {
 							if line.Type == "resource" {
 								m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
-								m.rebuildLines()
-								m.clampCursor()
-								m.clampOffset()
-							} else if line.Type == "diagnostic" {
-								m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
-								m.rebuildLines()
-								m.clampCursor()
-								m.clampOffset()
-							}
+							m.rebuildLines()
+							m.clampCursor()
+							m.clampOffset()
+						} else if line.Type == "diagnostic" {
+							m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
+							m.rebuildLines()
+							m.clampCursor()
+							m.clampOffset()
+						}
 						}
 					} else {
 						m.cursor = clickedLine
@@ -209,12 +384,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		m.autoScroll = false // Disable autoscroll on interaction
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 
 		case "l", "L":
-			// Toggle Logs view
 			m.showLogs = !m.showLogs
 			m.rebuildLines()
 			m.cursor = 0
@@ -234,7 +409,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter", " ":
-			// Toggle expand on header lines
 			if m.cursor < len(m.lines) && !m.showLogs {
 				line := m.lines[m.cursor]
 				if line.Type == "resource" {
@@ -243,10 +417,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.clampCursor()
 					m.clampOffset()
 				} else if line.Type == "diagnostic" {
-					m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
-					m.rebuildLines()
-					m.clampCursor()
-					m.clampOffset()
+				m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
+				m.rebuildLines()
+				m.clampCursor()
+				m.clampOffset()
 				}
 			}
 
@@ -270,7 +444,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "e":
 			if !m.showLogs {
-				// Expand all
 				for i := range m.resources {
 					m.resources[i].Expanded = true
 				}
@@ -284,7 +457,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "c":
 			if !m.showLogs {
-				// Collapse all
 				for i := range m.resources {
 					m.resources[i].Expanded = false
 				}
@@ -305,13 +477,11 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
-	// Calculate visible area
 	visibleHeight := m.height - 6
 	if visibleHeight < 5 {
 		visibleHeight = 5
 	}
 
-	// Slice visible lines
 	startLine := m.offset
 	endLine := startLine + visibleHeight
 	if startLine > len(m.lines) {
@@ -324,35 +494,34 @@ func (m Model) View() string {
 		startLine = 0
 	}
 
-	// Build output
 	var output strings.Builder
 
-	// Header
-	headerText := "Terraform Plan Viewer"
+	// Enhanced Header
+	var header string
 	if m.showLogs {
-		headerText = "Terraform Log Viewer"
+		header = headerLogStyle.Render("LOGS") + " " + dimStyle.Render("Terraform Output")
+	} else {
+		header = headerPlanStyle.Render("PLAN") + " " + dimStyle.Render("Terraform Viewer")
 	}
-	header := headerStyle.Render(headerText)
-	controls := dimStyle.Render(" ↑↓:navigate  ^u/^d:half-page  q:quit  L:toggle logs")
-	if !m.showLogs {
-		controls += dimStyle.Render("  Enter:expand  e/c:all")
+	
+	status := ""
+	if !m.done {
+		status = dimStyle.Render(" ● Live")
 	}
-	output.WriteString(header + controls + "\n\n")
 
-	// Scroll indicator (top)
+	controls := dimStyle.Render(" ↑↓:navigate  q:quit  L:toggle mode")
+	output.WriteString(header + status + "  " + controls + "\n\n")
+
 	if startLine > 0 {
 		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines above\n", startLine)))
 	}
 
-	// Content
 	for i := startLine; i < endLine; i++ {
 		line := m.lines[i]
 		isSelected := i == m.cursor
 
 		if line.Type == "log" {
-			// Log View
 			content := line.Content
-			// Simple heuristics for coloring
 			var style lipgloss.Style
 			if strings.Contains(content, "Error:") {
 				style = errorStyle
@@ -360,8 +529,10 @@ func (m Model) View() string {
 				style = warningStyle
 			} else if strings.HasPrefix(content, "Initializing") {
 				style = importStyle
-			} else if strings.Contains(content, "Success!") || strings.Contains(content, "Creation complete") {
+			} else if strings.Contains(content, "Success!") || strings.Contains(content, "Creation complete") || strings.Contains(content, "Complete!") {
 				style = createStyle
+			} else if strings.Contains(content, "Enter a value:") {
+				style = forcesStyle // Highlight prompts
 			} else if strings.Contains(content, "Creating...") || strings.Contains(content, "Destruction complete") {
 				style = updateStyle
 			} else {
@@ -376,7 +547,7 @@ func (m Model) View() string {
 			continue
 		}
 
-		// Plan View (existing logic)
+		// Resource View
 		switch line.Type {
 		case "diagnostic":
 			diag := m.diagnostics[line.DiagIdx]
@@ -389,12 +560,10 @@ func (m Model) View() string {
 				style = warningStyle
 				symbol = "⚠"
 			}
-
 			expandIcon := "▸"
 			if diag.Expanded {
 				expandIcon = "▾"
 			}
-
 			content := fmt.Sprintf("%s %s %s", expandIcon, symbol, diag.Summary)
 			if isSelected {
 				content = selectedStyle.Render("► " + content)
@@ -421,31 +590,19 @@ func (m Model) View() string {
 			rc := m.resources[line.ResourceIdx]
 			symbol := getSymbol(rc.Action)
 			style := getStyleForAction(rc.Action)
-
 			expandIcon := "▸"
 			if rc.Expanded {
 				expandIcon = "▾"
 			}
-
-			// Show full title: address + action text
 			if isSelected {
-				// Preserve semantic colors but add selection background
-				selBg := lipgloss.Color("#45475a") // Surface1
-				
-				// Arrow/Gutter
+				selBg := lipgloss.Color("#45475a")
 				arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")).Background(selBg).Bold(true)
-				
-				// Address part (Icon + Symbol + Address) - Inherit action color, add Bg
 				prefixStyle := style.Copy().Background(selBg)
 				prefix := prefixStyle.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
-				
-				// Action Text part - Inherit dim color, add Bg
 				suffixStyle := dimStyle.Copy().Background(selBg)
 				suffix := suffixStyle.Render(rc.ActionText)
-				
 				output.WriteString(fmt.Sprintf("%s%s %s\n", arrowStyle.Render("► "), prefix, suffix))
 			} else {
-				// Unselected: Color hierarchy
 				prefix := style.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
 				suffix := dimStyle.Render(rc.ActionText)
 				output.WriteString(fmt.Sprintf("  %s %s\n", prefix, suffix))
@@ -462,13 +619,11 @@ func (m Model) View() string {
 		}
 	}
 
-	// Scroll indicator (bottom)
 	remaining := len(m.lines) - endLine
 	if remaining > 0 {
 		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines below\n", remaining)))
 	}
 
-	// Footer with summary
 	if !m.showLogs {
 		output.WriteString("\n" + getSummary(m.resources, m.diagnostics))
 	} else {
@@ -656,151 +811,12 @@ func parseDiagnosticBlock(lines []string, errorPattern, warningPattern *regexp.R
 	}
 }
 
-func parseInput(reader io.Reader) ([]ResourceChange, []Diagnostic, []string) {
-	scanner := bufio.NewScanner(reader)
-	resources := make([]ResourceChange, 0)
-	diagnostics := make([]Diagnostic, 0)
-	logs := make([]string, 0)
-
-	headerPattern := regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
-	errorPattern := regexp.MustCompile(`Error:\s*(.+)`)
-	warningPattern := regexp.MustCompile(`Warning:\s*(.+)`)
-
-	var currentResource *ResourceChange
-	var diagLines []string
-	inResource := false
-	inDiagnostic := false
-	bracketDepth := 0
-
-	for scanner.Scan() {
-		rawLine := scanner.Text()
-		line := stripANSI(rawLine)
-
-		// Check for diagnostic block start (╷)
-		if strings.HasPrefix(line, "╷") {
-			inDiagnostic = true
-			diagLines = make([]string, 0)
-			continue
-		}
-
-		// Check for diagnostic block end (╵)
-		if strings.HasPrefix(line, "╵") {
-			if inDiagnostic && len(diagLines) > 0 {
-				// Process collected diagnostic lines
-				diag := parseDiagnosticBlock(diagLines, errorPattern, warningPattern)
-				if diag != nil {
-					diagnostics = append(diagnostics, *diag)
-				}
-			}
-			diagLines = nil
-			inDiagnostic = false
-			continue
-		}
-
-		// Collect lines inside diagnostic block
-		if inDiagnostic {
-			// Strip the │ prefix and collect
-			content := strings.TrimPrefix(line, "│")
-			diagLines = append(diagLines, content)
-			continue
-		}
-
-		// Check for resource header
-		if match := headerPattern.FindStringSubmatch(line); match != nil {
-			if currentResource != nil {
-				resources = append(resources, *currentResource)
-			}
-
-			address := match[1]
-			actionText := match[2]
-
-			var action string
-			switch actionText {
-			case "will be created":
-				action = "create"
-			case "will be updated in-place":
-				action = "update"
-			case "will be destroyed":
-				action = "destroy"
-			case "must be replaced":
-				action = "replace"
-			case "will be imported":
-				action = "import"
-			}
-
-			currentResource = &ResourceChange{
-				Address:    address,
-				Action:     action,
-				ActionText: actionText,
-				Attributes: make([]string, 0),
-			}
-			continue
-		}
-
-		if currentResource != nil && strings.Contains(line, " resource \"") {
-			inResource = true
-			bracketDepth = strings.Count(line, "{") - strings.Count(line, "}")
-			continue
-		}
-
-		if inResource {
-			bracketDepth += strings.Count(line, "{")
-			bracketDepth -= strings.Count(line, "}")
-
-			if currentResource != nil && !strings.Contains(line, " resource \"") {
-				trimmed := strings.TrimSpace(line)
-				if trimmed != "" && trimmed != "{" && trimmed != "}" {
-					currentResource.Attributes = append(currentResource.Attributes, trimmed)
-				}
-			}
-
-			if bracketDepth == 0 && strings.Contains(line, "}") {
-				if currentResource != nil {
-					resources = append(resources, *currentResource)
-					currentResource = nil
-				}
-				inResource = false
-			}
-			continue
-		}
-
-		// If we are here, it's not a resource block line or diagnostic line (that we know of).
-		// Store it in logs.
-		// NOTE: We store the stripped line because our styles are applied on top.
-		// If we want to keep original colors, we'd store rawLine.
-		// Given the request for consistent coloring, let's store stripped line and re-color.
-		if strings.TrimSpace(line) != "" {
-			logs = append(logs, line)
-		}
-	}
-
-	if currentResource != nil {
-		resources = append(resources, *currentResource)
-	}
-
-	return resources, diagnostics, logs
-}
-
 func main() {
-	resources, diagnostics, logs := parseInput(os.Stdin)
-
-	if len(resources) == 0 && len(diagnostics) == 0 && len(logs) == 0 {
-		fmt.Fprintln(os.Stderr, "No output found to display")
-		os.Exit(1)
-	}
-
-	// Determine initial view mode
-	// If we have resources, show Plan view (false)
-	// If we only have logs (e.g. init), show Log view (true)
-	showLogs := len(resources) == 0 && len(logs) > 0
-
+	// Default: Show logs initially, autoscroll on
 	m := Model{
-		resources:   resources,
-		diagnostics: diagnostics,
-		logs:        logs,
-		showLogs:    showLogs,
+		showLogs:   true, 
+		autoScroll: true,
 	}
-	m.rebuildLines()
 
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
