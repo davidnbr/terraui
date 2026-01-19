@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -41,6 +42,15 @@ type StreamMsg struct {
 	Diagnostic *Diagnostic
 	LogLine    *string
 	Done       bool
+}
+
+// Optimization: Tick message for batched UI updates
+type tickMsg time.Time
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(time.Millisecond*50, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
 }
 
 func readInput(reader io.Reader) tea.Cmd {
@@ -185,8 +195,9 @@ type Model struct {
 	offset      int
 	ready       bool
 	showLogs    bool
-	autoScroll  bool // Follow output
+	autoScroll  bool
 	done        bool
+	needsSync   bool // Optimization flag
 }
 
 // Styles
@@ -218,6 +229,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		readInput(os.Stdin),
 		waitForActivity(),
+		tickCmd(),
 	)
 }
 
@@ -304,45 +316,49 @@ func (m *Model) clampOffset() {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tickMsg:
+		if m.needsSync {
+			m.rebuildLines()
+			if m.autoScroll || (!m.ready) {
+				m.cursor = len(m.lines) - 1
+				m.clampCursor()
+				m.ensureCursorVisible()
+			}
+			m.needsSync = false
+		}
+		return m, tickCmd()
+
 	case StreamMsg:
 		if msg.Done {
 			m.done = true
+			m.needsSync = true
 			return m, nil
 		}
 
 		if msg.Resource != nil {
 			m.resources = append(m.resources, *msg.Resource)
-			// Automatically switch to Plan view if we see resources
 			m.showLogs = false
+			m.needsSync = true
 		}
 		if msg.Diagnostic != nil {
 			m.diagnostics = append(m.diagnostics, *msg.Diagnostic)
+			m.needsSync = true
 		}
 		if msg.LogLine != nil {
 			m.logs = append(m.logs, *msg.LogLine)
-			// If we are in Log mode and autoscroll is on (or we are at bottom), scroll
+			m.needsSync = true
 		}
-
-		m.rebuildLines()
 		
-		// Auto-scroll logic
-		if m.autoScroll || (!m.ready) { // Always autoscroll if not ready/interacting yet
-			m.cursor = len(m.lines) - 1
-			m.clampCursor()
-			m.ensureCursorVisible()
-		}
-
 		return m, waitForActivity()
 
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		m.ready = true
-		m.rebuildLines()
-		m.clampOffset()
+		m.needsSync = true
 		return m, nil
 
 	case tea.MouseMsg:
-		m.autoScroll = false // Disable autoscroll on interaction
+		m.autoScroll = false
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			m.cursor -= 3
@@ -384,7 +400,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		m.autoScroll = false // Disable autoscroll on interaction
+		m.autoScroll = false
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -417,10 +433,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.clampCursor()
 					m.clampOffset()
 				} else if line.Type == "diagnostic" {
-				m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
-				m.rebuildLines()
-				m.clampCursor()
-				m.clampOffset()
+					m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
+					m.rebuildLines()
+					m.clampCursor()
+					m.clampOffset()
 				}
 			}
 
