@@ -908,8 +908,9 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 	if isSelected {
 		selBg := lipgloss.Color("#45475a")
 		arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")).Background(selBg).Bold(true)
-		prefixStyle := style.Background(selBg)
-		suffixStyle := dimStyle.Background(selBg)
+		// Create new styles with background - don't modify originals
+		prefixStyle := lipgloss.NewStyle().Foreground(style.GetForeground()).Background(selBg).Bold(true)
+		suffixStyle := lipgloss.NewStyle().Foreground(dimStyle.GetForeground()).Background(selBg)
 
 		prefix := prefixStyle.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
 		suffix := suffixStyle.Render(rc.ActionText)
