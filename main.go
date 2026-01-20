@@ -136,7 +136,7 @@ var (
 	// UI chrome colors
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c"))            // Gray
 	defaultStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))            // Text
-	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#45475a")) // Highlight
+	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cdd6f4")).Background(lipgloss.Color("#45475a")) // Highlight
 )
 
 // Pre-compiled regex patterns for parsing
