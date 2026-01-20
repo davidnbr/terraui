@@ -1,12 +1,18 @@
+// Package main provides a terminal UI for viewing Terraform plan output.
+// It supports both piped input (terraform plan | terraui) and interactive mode
+// (terraui terraform apply) with PTY support for handling prompts.
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,359 +20,428 @@ import (
 	"github.com/creack/pty"
 )
 
+// UI constants for layout calculations and behavior
+const (
+	headerFooterHeight     = 6 // Lines reserved for header, footer, and margins
+	minVisibleHeight       = 5 // Minimum lines to show in viewport
+	mouseScrollLines       = 3 // Lines to scroll per mouse wheel tick
+	uiTickRate             = 50 * time.Millisecond
+	streamBufferSize       = 100 // Buffer size for stream channel
+	processShutdownTimeout = 5 * time.Second
+)
+
+// LineType represents the type of a display line
+type LineType int
+
+const (
+	LineTypeResource LineType = iota
+	LineTypeAttribute
+	LineTypeDiagnostic
+	LineTypeDiagnosticDetail
+	LineTypeLog
+)
+
+// ResourceChange represents a single resource change from terraform plan
 type ResourceChange struct {
-	Address    string
-	Action     string
-	ActionText string // Original text like "will be updated in-place", "must be replaced"
-	Attributes []string
-	Expanded   bool
+	Address    string   // Resource address (e.g., "aws_instance.web")
+	Action     string   // Action type: create, update, destroy, replace, import
+	ActionText string   // Original text like "will be updated in-place", "must be replaced"
+	Attributes []string // List of attribute changes
+	Expanded   bool     // Whether details are expanded in UI
 }
 
+// Diagnostic represents an error or warning from Terraform
 type Diagnostic struct {
-	Severity string // "error" or "warning"
-	Summary  string
-	Detail   []string
-	Expanded bool
+	Severity string   // "error" or "warning"
+	Summary  string   // Main message
+	Detail   []string // Additional detail lines
+	Expanded bool     // Whether details are expanded in UI
 }
 
-// Line represents a single display line
+// Line represents a single display line in the UI
 type Line struct {
-	Type        string // "resource", "attribute", "diagnostic", "diagnostic_detail", "log"
-	ResourceIdx int    // Which resource this belongs to (-1 if diagnostic)
-	DiagIdx     int    // Which diagnostic this belongs to (-1 if resource)
-	AttrIdx     int    // -1 for headers, >=0 for attribute/detail
-	Content     string // Raw content
+	Type        LineType // Type of line content
+	ResourceIdx int      // Index into resources slice (-1 if not applicable)
+	DiagIdx     int      // Index into diagnostics slice (-1 if not applicable)
+	AttrIdx     int      // Index into attributes/details (-1 for headers)
+	Content     string   // Raw content for display
 }
 
+// StreamMsg carries parsed content from the input stream to the UI
 type StreamMsg struct {
 	Resource   *ResourceChange
 	Diagnostic *Diagnostic
 	LogLine    *string
-	Prompt     *string // New: Partial line that looks like a prompt
-	Done       bool
+	Prompt     *string // Partial line that looks like a prompt (no trailing newline)
+	Done       bool    // Signals end of input stream
 }
 
-// Optimization: Tick message for batched UI updates
+// tickMsg triggers periodic UI updates for batched rendering
 type tickMsg time.Time
 
-func tickCmd() tea.Cmd {
-	return tea.Tick(time.Millisecond*50, func(t time.Time) tea.Msg {
-		return tickMsg(t)
-	})
+// Model holds the application state for the Bubble Tea framework
+type Model struct {
+	// Data
+	resources   []ResourceChange
+	diagnostics []Diagnostic
+	logs        []string
+	lines       []Line // Computed display lines based on expand state
+
+	// UI state
+	cursor     int  // Current line index
+	height     int  // Terminal height
+	offset     int  // Scroll offset
+	ready      bool // Whether initial size is known
+	showLogs   bool // Toggle between log view and plan view
+	autoScroll bool // Auto-scroll to bottom on new content
+	done       bool // Input stream finished
+	needsSync  bool // Pending rebuild of lines slice
+
+	// PTY/Interactive mode
+	ptyFile   *os.File
+	inputMode bool   // Currently accepting user input
+	userInput string // Buffer for user typing
+	prompt    string // Active prompt from stream
+
+	// Concurrency
+	streamChan chan StreamMsg     // Channel for receiving parsed content
+	cancelFunc context.CancelFunc // For signaling goroutine shutdown
 }
 
-func readInput(reader io.Reader) tea.Cmd {
-	return func() tea.Msg {
-		return doRead(reader)
-	}
-}
+// Styles using Catppuccin Mocha color palette
+var (
+	// Header badges
+	headerPlanStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1)
+	headerLogStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1)
+	inputModeStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1)
 
-// Channel to coordinate the scanner goroutine
-var streamChan = make(chan StreamMsg)
+	// Resource action colors (bold for headers)
+	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true) // Green
+	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true) // Yellow
+	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Red
+	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true) // Mauve
+	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true) // Sky
 
-// Optimization: Pre-compile regexes
+	// Diagnostic colors
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Red
+	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true) // Peach
+	promptStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true) // Pink
+
+	// Attribute colors (non-bold for content)
+	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))            // Green
+	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555"))            // Red
+	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))            // Yellow
+	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Red bold
+
+	// UI chrome colors
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c"))            // Gray
+	defaultStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))            // Text
+	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#45475a")) // Highlight
+)
+
+// Pre-compiled regex patterns for parsing
 var (
 	headerPattern  = regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
 	errorPattern   = regexp.MustCompile(`Error:\s*(.+)`)
 	warningPattern = regexp.MustCompile(`Warning:\s*(.+)`)
-	promptPattern  = regexp.MustCompile(`Enter a value:\s*$`) // Detect prompt at end of buffer
+	promptPattern  = regexp.MustCompile(`Enter a value:\s*$`)
+	ansiPattern    = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 )
 
-func doRead(reader io.Reader) tea.Msg {
-	go func() {
-		// Use a larger buffer and manual processing to catch prompts (which don't end in \n)
-		buf := make([]byte, 4096)
-		var lineBuffer string
-
-		var currentResource *ResourceChange
-		var diagLines []string
-		inResource := false
-		inDiagnostic := false
-		bracketDepth := 0
-
-		processLine := func(rawLine string) {
-			line := stripANSI(rawLine)
-
-			// Diagnostic handling
-			if strings.HasPrefix(line, "╷") {
-				inDiagnostic = true
-				diagLines = make([]string, 0)
-				return
-			}
-			if strings.HasPrefix(line, "╵") {
-				if inDiagnostic && len(diagLines) > 0 {
-					diag := parseDiagnosticBlock(diagLines, errorPattern, warningPattern)
-					if diag != nil {
-						streamChan <- StreamMsg{Diagnostic: diag}
-					}
-				}
-				diagLines = nil
-				inDiagnostic = false
-				return
-			}
-			if inDiagnostic {
-				content := strings.TrimPrefix(line, "│")
-				diagLines = append(diagLines, content)
-				return
-			}
-
-			// Resource Header
-			if match := headerPattern.FindStringSubmatch(line); match != nil {
-				if currentResource != nil {
-					res := *currentResource
-					streamChan <- StreamMsg{Resource: &res}
-					currentResource = nil
-				}
-				address := match[1]
-				actionText := match[2]
-				var action string
-				switch actionText {
-				case "will be created":
-					action = "create"
-				case "will be updated in-place":
-					action = "update"
-				case "will be destroyed":
-					action = "destroy"
-				case "must be replaced":
-					action = "replace"
-				case "will be imported":
-					action = "import"
-				}
-				currentResource = &ResourceChange{
-					Address:    address,
-					Action:     action,
-					ActionText: actionText,
-					Attributes: make([]string, 0),
-				}
-				return
-			}
-
-			// Resource Body
-			if currentResource != nil && strings.Contains(line, " resource \"") {
-				inResource = true
-				bracketDepth = strings.Count(line, "{") - strings.Count(line, "}")
-				return
-			}
-			if inResource {
-				bracketDepth += strings.Count(line, "{")
-				bracketDepth -= strings.Count(line, "}")
-				if currentResource != nil && !strings.Contains(line, " resource \"") {
-					trimmed := strings.TrimSpace(line)
-					if trimmed != "" && trimmed != "{" && trimmed != "}" {
-						currentResource.Attributes = append(currentResource.Attributes, trimmed)
-					}
-				}
-				if bracketDepth == 0 && strings.Contains(line, "}") {
-					if currentResource != nil {
-						res := *currentResource
-						streamChan <- StreamMsg{Resource: &res}
-						currentResource = nil
-					}
-					inResource = false
-				}
-				return
-			}
-
-			// Generic Log
-			if strings.TrimSpace(line) != "" {
-				l := line
-				streamChan <- StreamMsg{LogLine: &l}
-			}
-		}
-
-		for {
-			n, err := reader.Read(buf)
-			if n > 0 {
-				chunk := string(buf[:n])
-				lineBuffer += chunk
-
-				// Process complete lines
-				for {
-					idx := strings.Index(lineBuffer, "\n")
-					if idx == -1 {
-						break
-					}
-					line := lineBuffer[:idx]
-					lineBuffer = lineBuffer[idx+1:]
-					// Strip \r if present (common in PTY)
-					line = strings.TrimSuffix(line, "\r")
-					processLine(line)
-				}
-
-				// Check remaining buffer for Prompt (no newline)
-				cleanBuffer := stripANSI(lineBuffer)
-				if promptPattern.MatchString(cleanBuffer) {
-					p := strings.TrimSpace(cleanBuffer)
-					streamChan <- StreamMsg{Prompt: &p}
-					// We don't clear lineBuffer; we'll process it when the user hits Enter (and \n comes)
-				}
-			}
-			if err != nil {
-				break
-			}
-		}
-
-		if currentResource != nil {
-			res := *currentResource
-			streamChan <- StreamMsg{Resource: &res}
-		}
-
-		streamChan <- StreamMsg{Done: true}
-	}()
-	return nil
-}
-
-func waitForActivity() tea.Cmd {
-	return func() tea.Msg {
-		return <-streamChan
-	}
-}
-
-type Model struct {
-	resources   []ResourceChange
-	diagnostics []Diagnostic
-	logs        []string
-	lines       []Line
-	cursor      int
-	height      int
-	offset      int
-	ready       bool
-	showLogs    bool
-	autoScroll  bool
-	done        bool
-	needsSync   bool
-
-	ptyFile   *os.File
-	inputMode bool
-	userInput string // Local echo of what user is typing
-	prompt    string // Active prompt detected from stream
-}
-
-// Styles
-var (
-	headerPlanStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1) // Blue Bg
-	headerLogStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1) // Mauve Bg
-	inputModeStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1) // Green for Input
-
-	// Resource header colors (Catppuccin Mocha + Vibrant Red)
-	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true) // Green
-	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true) // Yellow
-	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
-	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true) // Mauve
-	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true) // Sky
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
-	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true) // Peach
-	promptStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true) // Pink/Fuchsia for prompts
-
-	// Attribute colors
-	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))            // Green
-	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555"))            // Vibrant Red
-	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))            // Yellow
-	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Vibrant Red
-
-	// UI colors
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c"))            // Overlay1
-	defaultStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))            // Text
-	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#45475a")) // Surface1
-)
-
+// Init implements tea.Model. Starts input reading and periodic ticks.
 func (m Model) Init() tea.Cmd {
-	// If we have a PTY, we are responsible for closing it eventually,
-	// but mostly we just read from it until EOF.
 	var reader io.Reader = os.Stdin
 	if m.ptyFile != nil {
 		reader = m.ptyFile
 	}
 
+	// Start the input reading goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancelFunc = cancel
+	go m.readInputStream(ctx, reader)
+
 	return tea.Batch(
-		readInput(reader),
-		waitForActivity(),
+		m.waitForStreamMsg(),
 		tickCmd(),
 	)
 }
 
-// Rebuild the lines slice based on current expand state
+// readInputStream reads from the input and sends parsed messages to streamChan.
+// Runs in a separate goroutine and respects context cancellation.
+func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
+	defer close(m.streamChan)
+
+	buf := make([]byte, 4096)
+	var lineBuffer string
+	var currentResource *ResourceChange
+	var diagLines []string
+	inResource := false
+	inDiagnostic := false
+	bracketDepth := 0
+
+	processLine := func(rawLine string) {
+		line := stripANSI(rawLine)
+
+		// Diagnostic block handling
+		if strings.HasPrefix(line, "╷") {
+			inDiagnostic = true
+			diagLines = make([]string, 0)
+			return
+		}
+		if strings.HasPrefix(line, "╵") {
+			if inDiagnostic && len(diagLines) > 0 {
+				diag := parseDiagnosticBlock(diagLines)
+				if diag != nil {
+					select {
+					case m.streamChan <- StreamMsg{Diagnostic: diag}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+			diagLines = nil
+			inDiagnostic = false
+			return
+		}
+		if inDiagnostic {
+			content := strings.TrimPrefix(line, "│")
+			diagLines = append(diagLines, content)
+			return
+		}
+
+		// Resource header detection
+		if match := headerPattern.FindStringSubmatch(line); match != nil {
+			if currentResource != nil {
+				res := *currentResource
+				select {
+				case m.streamChan <- StreamMsg{Resource: &res}:
+				case <-ctx.Done():
+					return
+				}
+				currentResource = nil
+			}
+			currentResource = &ResourceChange{
+				Address:    match[1],
+				Action:     parseAction(match[2]),
+				ActionText: match[2],
+				Attributes: make([]string, 0),
+			}
+			return
+		}
+
+		// Resource body parsing
+		if currentResource != nil && strings.Contains(line, " resource \"") {
+			inResource = true
+			bracketDepth = strings.Count(line, "{") - strings.Count(line, "}")
+			return
+		}
+		if inResource {
+			bracketDepth += strings.Count(line, "{")
+			bracketDepth -= strings.Count(line, "}")
+			if currentResource != nil && !strings.Contains(line, " resource \"") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed != "" && trimmed != "{" && trimmed != "}" {
+					currentResource.Attributes = append(currentResource.Attributes, trimmed)
+				}
+			}
+			if bracketDepth == 0 && strings.Contains(line, "}") {
+				if currentResource != nil {
+					res := *currentResource
+					select {
+					case m.streamChan <- StreamMsg{Resource: &res}:
+					case <-ctx.Done():
+						return
+					}
+					currentResource = nil
+				}
+				inResource = false
+			}
+			return
+		}
+
+		// Generic log line
+		if strings.TrimSpace(line) != "" {
+			l := line
+			select {
+			case m.streamChan <- StreamMsg{LogLine: &l}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		n, err := reader.Read(buf)
+		if n > 0 {
+			chunk := string(buf[:n])
+			lineBuffer += chunk
+
+			// Process complete lines
+			for {
+				idx := strings.Index(lineBuffer, "\n")
+				if idx == -1 {
+					break
+				}
+				line := strings.TrimSuffix(lineBuffer[:idx], "\r")
+				lineBuffer = lineBuffer[idx+1:]
+				processLine(line)
+			}
+
+			// Check for prompt (no trailing newline)
+			cleanBuffer := stripANSI(lineBuffer)
+			if promptPattern.MatchString(cleanBuffer) {
+				p := strings.TrimSpace(cleanBuffer)
+				select {
+				case m.streamChan <- StreamMsg{Prompt: &p}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	// Flush any remaining resource
+	if currentResource != nil {
+		res := *currentResource
+		select {
+		case m.streamChan <- StreamMsg{Resource: &res}:
+		case <-ctx.Done():
+		}
+	}
+
+	select {
+	case m.streamChan <- StreamMsg{Done: true}:
+	case <-ctx.Done():
+	}
+}
+
+// waitForStreamMsg returns a command that waits for the next stream message
+func (m Model) waitForStreamMsg() tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-m.streamChan
+		if !ok {
+			return StreamMsg{Done: true}
+		}
+		return msg
+	}
+}
+
+// tickCmd returns a command for periodic UI updates
+func tickCmd() tea.Cmd {
+	return tea.Tick(uiTickRate, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+// visibleHeight calculates the number of content lines visible in the viewport
+func (m *Model) visibleHeight() int {
+	h := m.height - headerFooterHeight
+	if m.prompt != "" {
+		h -= 2 // Reserve space for pinned prompt
+	}
+	if h < minVisibleHeight {
+		h = minVisibleHeight
+	}
+	return h
+}
+
+// rebuildLines reconstructs the display lines based on current expand state
 func (m *Model) rebuildLines() {
 	m.lines = nil
 
 	if m.showLogs {
 		for i, log := range m.logs {
-			m.lines = append(m.lines, Line{Type: "log", Content: log, AttrIdx: i})
+			m.lines = append(m.lines, Line{
+				Type:    LineTypeLog,
+				Content: log,
+				AttrIdx: i,
+			})
 		}
 		return
 	}
 
-	// Plan View
-	// Add diagnostics first (errors and warnings)
+	// Plan view: diagnostics first, then resources
 	for i, diag := range m.diagnostics {
-		m.lines = append(m.lines, Line{Type: "diagnostic", DiagIdx: i, ResourceIdx: -1, AttrIdx: -1})
-
+		m.lines = append(m.lines, Line{
+			Type:        LineTypeDiagnostic,
+			DiagIdx:     i,
+			ResourceIdx: -1,
+			AttrIdx:     -1,
+		})
 		if diag.Expanded {
 			for j, detail := range diag.Detail {
-				m.lines = append(m.lines, Line{Type: "diagnostic_detail", DiagIdx: i, ResourceIdx: -1, AttrIdx: j, Content: detail})
+				m.lines = append(m.lines, Line{
+					Type:        LineTypeDiagnosticDetail,
+					DiagIdx:     i,
+					ResourceIdx: -1,
+					AttrIdx:     j,
+					Content:     detail,
+				})
 			}
 		}
 	}
 
-	// Add resources
 	for i, rc := range m.resources {
-		m.lines = append(m.lines, Line{Type: "resource", ResourceIdx: i, DiagIdx: -1, AttrIdx: -1})
-
+		m.lines = append(m.lines, Line{
+			Type:        LineTypeResource,
+			ResourceIdx: i,
+			DiagIdx:     -1,
+			AttrIdx:     -1,
+		})
 		if rc.Expanded {
-			for j := range rc.Attributes {
-				m.lines = append(m.lines, Line{Type: "attribute", ResourceIdx: i, DiagIdx: -1, AttrIdx: j, Content: rc.Attributes[j]})
+			for j, attr := range rc.Attributes {
+				m.lines = append(m.lines, Line{
+					Type:        LineTypeAttribute,
+					ResourceIdx: i,
+					DiagIdx:     -1,
+					AttrIdx:     j,
+					Content:     attr,
+				})
 			}
 		}
 	}
 }
 
+// clampCursor ensures cursor stays within valid bounds
 func (m *Model) clampCursor() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
-	if m.cursor >= len(m.lines) {
-		m.cursor = len(m.lines) - 1
+	maxCursor := len(m.lines) - 1
+	if maxCursor < 0 {
+		maxCursor = 0
 	}
-	if m.cursor < 0 {
-		m.cursor = 0
+	if m.cursor > maxCursor {
+		m.cursor = maxCursor
 	}
 }
 
+// ensureCursorVisible adjusts offset to keep cursor in view
 func (m *Model) ensureCursorVisible() {
-	visibleHeight := m.height - 6
-	if visibleHeight < 5 {
-		visibleHeight = 5
-	}
-
-	// Adjust visible height if we are showing a pinned prompt
-	if m.prompt != "" {
-		visibleHeight -= 2
-	}
-
+	vh := m.visibleHeight()
 	if m.cursor < m.offset {
 		m.offset = m.cursor
-	} else if m.cursor >= m.offset+visibleHeight {
-		m.offset = m.cursor - visibleHeight + 1
+	} else if m.cursor >= m.offset+vh {
+		m.offset = m.cursor - vh + 1
 	}
-
 	m.clampOffset()
 }
 
+// clampOffset ensures scroll offset stays within valid bounds
 func (m *Model) clampOffset() {
-	visibleHeight := m.height - 6
-	if visibleHeight < 5 {
-		visibleHeight = 5
-	}
-
-	// Adjust visible height if we are showing a pinned prompt
-	if m.prompt != "" {
-		visibleHeight -= 2
-	}
-
 	if m.offset < 0 {
 		m.offset = 0
 	}
-	maxOffset := len(m.lines) - visibleHeight
+	maxOffset := len(m.lines) - m.visibleHeight()
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
@@ -375,12 +450,13 @@ func (m *Model) clampOffset() {
 	}
 }
 
+// Update implements tea.Model. Handles all messages and user input.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tickMsg:
 		if m.needsSync {
 			m.rebuildLines()
-			if m.autoScroll || (!m.ready) {
+			if m.autoScroll || !m.ready {
 				m.cursor = len(m.lines) - 1
 				m.clampCursor()
 				m.ensureCursorVisible()
@@ -395,7 +471,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.needsSync = true
 			return m, nil
 		}
-
 		if msg.Resource != nil {
 			m.resources = append(m.resources, *msg.Resource)
 			m.showLogs = false
@@ -413,8 +488,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prompt = *msg.Prompt
 			m.needsSync = true
 		}
-
-		return m, waitForActivity()
+		return m, m.waitForStreamMsg()
 
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
@@ -423,225 +497,216 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		m.autoScroll = false
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			m.cursor -= 3
-			m.clampCursor()
-			m.ensureCursorVisible()
-		case tea.MouseButtonWheelDown:
-			m.cursor += 3
-			m.clampCursor()
-			m.ensureCursorVisible()
-		case tea.MouseButtonLeft:
-			if msg.Action == tea.MouseActionPress {
-				headerOffset := 2
-				if m.offset > 0 {
-					headerOffset = 3
-				}
-				clickedLine := m.offset + msg.Y - headerOffset
-				if msg.Y >= headerOffset && clickedLine >= 0 && clickedLine < len(m.lines) {
-					if m.cursor == clickedLine {
-						line := m.lines[clickedLine]
-						if !m.showLogs {
-							if line.Type == "resource" {
-								m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
-								m.rebuildLines()
-								m.clampCursor()
-								m.clampOffset()
-							} else if line.Type == "diagnostic" {
-								m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
-								m.rebuildLines()
-								m.clampCursor()
-								m.clampOffset()
-							}
-						}
-					} else {
-						m.cursor = clickedLine
-					}
-				}
-			}
-		}
-		return m, nil
+		return m.handleMouseMsg(msg)
 
 	case tea.KeyMsg:
-		m.autoScroll = false
-
-		// INPUT MODE LOGIC
-
-		if m.inputMode && m.ptyFile != nil {
-
-			if msg.Type == tea.KeyEsc {
-
-				m.inputMode = false
-
-				return m, nil
-
-			}
-
-			// LINE BUFFERING MODE
-
-			// We buffer input locally and only send on Enter.
-
-			// This prevents PTY echo artifacts and allows local editing (backspace) before sending.
-
-			switch msg.Type {
-
-			case tea.KeyCtrlC:
-
-				// Send interrupt immediately
-
-				m.ptyFile.Write([]byte{3})
-
-				return m, tea.Quit
-
-			case tea.KeyBackspace, tea.KeyDelete:
-
-				if len(m.userInput) > 0 {
-
-					m.userInput = m.userInput[:len(m.userInput)-1]
-
-				}
-
-			case tea.KeyRunes:
-
-				m.userInput += string(msg.Runes)
-
-			case tea.KeySpace:
-
-				m.userInput += " "
-
-			case tea.KeyEnter:
-				// Flush buffer to PTY
-				payload := []byte(m.userInput + "\n")
-				m.ptyFile.Write(payload)
-
-				// Reset state
-				m.userInput = ""
-				m.prompt = "" // Optimistically hide prompt until new one appears
-
-				// UX: Automatically exit input mode and switch to logs to follow progress
-				m.inputMode = false
-				m.showLogs = true
-				m.autoScroll = true
-				m.rebuildLines() // Force immediate UI refresh to show mode change
-			}
-
-			return m, nil
-		}
-
-		// NORMAL NAVIGATION MODE
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-
-		case "i":
-			if m.ptyFile != nil {
-				m.inputMode = true
-				return m, nil
-			}
-
-		case "l", "L":
-			m.showLogs = !m.showLogs
-			m.rebuildLines()
-			m.cursor = 0
-			m.offset = 0
-			m.autoScroll = false
-			return m, nil
-
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-				m.ensureCursorVisible()
-			}
-
-		case "down", "j":
-			if m.cursor < len(m.lines)-1 {
-				m.cursor++
-				m.ensureCursorVisible()
-			}
-
-		case "enter", " ":
-			if m.cursor < len(m.lines) && !m.showLogs {
-				line := m.lines[m.cursor]
-				if line.Type == "resource" {
-					m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
-					m.rebuildLines()
-					m.clampCursor()
-					m.clampOffset()
-				} else if line.Type == "diagnostic" {
-					m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
-					m.rebuildLines()
-					m.clampCursor()
-					m.clampOffset()
-				}
-			}
-
-		case "pgup", "ctrl+u":
-			m.cursor -= m.height / 2
-			m.clampCursor()
-			m.ensureCursorVisible()
-
-		case "pgdown", "ctrl+d":
-			m.cursor += m.height / 2
-			m.clampCursor()
-			m.ensureCursorVisible()
-
-		case "home", "g":
-			m.cursor = 0
-			m.offset = 0
-
-		case "end", "G":
-			m.cursor = len(m.lines) - 1
-			m.ensureCursorVisible()
-
-		case "e":
-			if !m.showLogs {
-				for i := range m.resources {
-					m.resources[i].Expanded = true
-				}
-				for i := range m.diagnostics {
-					m.diagnostics[i].Expanded = true
-				}
-				m.rebuildLines()
-				m.clampCursor()
-				m.clampOffset()
-			}
-
-		case "c":
-			if !m.showLogs {
-				for i := range m.resources {
-					m.resources[i].Expanded = false
-				}
-				for i := range m.diagnostics {
-					m.diagnostics[i].Expanded = false
-				}
-				m.rebuildLines()
-				m.clampCursor()
-				m.clampOffset()
-			}
-		}
+		return m.handleKeyMsg(msg)
 	}
+
 	return m, nil
 }
 
+// handleMouseMsg processes mouse events
+func (m Model) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	m.autoScroll = false
+
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		m.cursor -= mouseScrollLines
+		m.clampCursor()
+		m.ensureCursorVisible()
+
+	case tea.MouseButtonWheelDown:
+		m.cursor += mouseScrollLines
+		m.clampCursor()
+		m.ensureCursorVisible()
+
+	case tea.MouseButtonLeft:
+		if msg.Action == tea.MouseActionPress {
+			headerOffset := 2
+			if m.offset > 0 {
+				headerOffset = 3 // Account for "more above" indicator
+			}
+			clickedLine := m.offset + msg.Y - headerOffset
+			if msg.Y >= headerOffset && clickedLine >= 0 && clickedLine < len(m.lines) {
+				if m.cursor == clickedLine {
+					m.toggleExpand(clickedLine)
+				} else {
+					m.cursor = clickedLine
+				}
+			}
+		}
+	}
+
+	return m, nil
+}
+
+// handleKeyMsg processes keyboard input
+func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.autoScroll = false
+
+	// Input mode: handle typing
+	if m.inputMode && m.ptyFile != nil {
+		return m.handleInputMode(msg)
+	}
+
+	// Normal navigation mode
+	switch msg.String() {
+	case "q", "ctrl+c":
+		if m.cancelFunc != nil {
+			m.cancelFunc()
+		}
+		return m, tea.Quit
+
+	case "i":
+		if m.ptyFile != nil {
+			m.inputMode = true
+		}
+
+	case "l", "L":
+		m.showLogs = !m.showLogs
+		m.rebuildLines()
+		m.cursor = 0
+		m.offset = 0
+		m.autoScroll = false
+
+	case "up", "k":
+		if m.cursor > 0 {
+			m.cursor--
+			m.ensureCursorVisible()
+		}
+
+	case "down", "j":
+		if m.cursor < len(m.lines)-1 {
+			m.cursor++
+			m.ensureCursorVisible()
+		}
+
+	case "enter", " ":
+		m.toggleExpand(m.cursor)
+
+	case "pgup", "ctrl+u":
+		m.cursor -= m.height / 2
+		m.clampCursor()
+		m.ensureCursorVisible()
+
+	case "pgdown", "ctrl+d":
+		m.cursor += m.height / 2
+		m.clampCursor()
+		m.ensureCursorVisible()
+
+	case "home", "g":
+		m.cursor = 0
+		m.offset = 0
+
+	case "end", "G":
+		m.cursor = len(m.lines) - 1
+		m.ensureCursorVisible()
+
+	case "e":
+		m.expandAll(true)
+
+	case "c":
+		m.expandAll(false)
+	}
+
+	return m, nil
+}
+
+// handleInputMode processes keyboard input when in input mode
+func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.inputMode = false
+
+	case tea.KeyCtrlC:
+		if _, err := m.ptyFile.Write([]byte{3}); err != nil {
+			// Log error but continue - user wants to quit anyway
+		}
+		if m.cancelFunc != nil {
+			m.cancelFunc()
+		}
+		return m, tea.Quit
+
+	case tea.KeyBackspace, tea.KeyDelete:
+		if len(m.userInput) > 0 {
+			m.userInput = m.userInput[:len(m.userInput)-1]
+		}
+
+	case tea.KeyRunes:
+		m.userInput += string(msg.Runes)
+
+	case tea.KeySpace:
+		m.userInput += " "
+
+	case tea.KeyEnter:
+		payload := m.userInput + "\n"
+		if _, err := m.ptyFile.Write([]byte(payload)); err != nil {
+			// PTY write failed - could set error state here
+		}
+		m.userInput = ""
+		m.prompt = ""
+		m.inputMode = false
+		m.showLogs = true
+		m.autoScroll = true
+		m.rebuildLines()
+	}
+
+	return m, nil
+}
+
+// toggleExpand toggles the expanded state of a resource or diagnostic at lineIdx
+func (m *Model) toggleExpand(lineIdx int) {
+	if lineIdx < 0 || lineIdx >= len(m.lines) || m.showLogs {
+		return
+	}
+
+	line := m.lines[lineIdx]
+	switch line.Type {
+	case LineTypeResource:
+		if line.ResourceIdx >= 0 && line.ResourceIdx < len(m.resources) {
+			m.resources[line.ResourceIdx].Expanded = !m.resources[line.ResourceIdx].Expanded
+			m.rebuildLines()
+			m.clampCursor()
+			m.clampOffset()
+		}
+	case LineTypeDiagnostic:
+		if line.DiagIdx >= 0 && line.DiagIdx < len(m.diagnostics) {
+			m.diagnostics[line.DiagIdx].Expanded = !m.diagnostics[line.DiagIdx].Expanded
+			m.rebuildLines()
+			m.clampCursor()
+			m.clampOffset()
+		}
+	}
+}
+
+// expandAll sets the expanded state of all resources and diagnostics
+func (m *Model) expandAll(expanded bool) {
+	if m.showLogs {
+		return
+	}
+	for i := range m.resources {
+		m.resources[i].Expanded = expanded
+	}
+	for i := range m.diagnostics {
+		m.diagnostics[i].Expanded = expanded
+	}
+	m.rebuildLines()
+	m.clampCursor()
+	m.clampOffset()
+}
+
+// View implements tea.Model. Renders the UI.
 func (m Model) View() string {
 	if !m.ready {
 		return "Loading..."
 	}
 
-	visibleHeight := m.height - 6
-	if visibleHeight < 5 {
-		visibleHeight = 5
-	}
-
-	// Calculate if we need to reserve space for the pinned prompt
-	if m.prompt != "" {
-		visibleHeight -= 2 // Newline + Prompt line
-	}
-
+	vh := m.visibleHeight()
 	startLine := m.offset
-	endLine := startLine + visibleHeight
+	endLine := startLine + vh
+
+	// Clamp bounds
 	if startLine > len(m.lines) {
 		startLine = len(m.lines)
 	}
@@ -654,7 +719,41 @@ func (m Model) View() string {
 
 	var output strings.Builder
 
-	// Header Logic
+	// Header
+	output.WriteString(m.renderHeader())
+	output.WriteString("\n\n")
+
+	// Scroll indicator (top)
+	if startLine > 0 {
+		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines above\n", startLine)))
+	}
+
+	// Content lines
+	for i := startLine; i < endLine; i++ {
+		output.WriteString(m.renderLine(i))
+		output.WriteString("\n")
+	}
+
+	// Scroll indicator (bottom)
+	if remaining := len(m.lines) - endLine; remaining > 0 {
+		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines below\n", remaining)))
+	}
+
+	// Pinned prompt
+	if m.prompt != "" {
+		output.WriteString("\n")
+		output.WriteString(m.renderPrompt())
+	}
+
+	// Footer
+	output.WriteString("\n")
+	output.WriteString(m.renderFooter())
+
+	return output.String()
+}
+
+// renderHeader renders the header bar with mode, status, and controls
+func (m Model) renderHeader() string {
 	var header string
 	if m.inputMode {
 		header = inputModeStyle.Render("INPUT") + " " + dimStyle.Render("Interactive Mode")
@@ -664,7 +763,7 @@ func (m Model) View() string {
 		header = headerPlanStyle.Render("PLAN") + " " + dimStyle.Render("Terraform Viewer")
 	}
 
-	status := ""
+	var status string
 	if m.prompt != "" {
 		status = warningStyle.Render(" ● WAITING FOR INPUT")
 	} else if !m.done {
@@ -681,178 +780,208 @@ func (m Model) View() string {
 			controls += dimStyle.Render("  i:enter input")
 		}
 	}
-	output.WriteString(header + status + "  " + controls + "\n\n")
 
-	// ... (Rest of View logic remains exactly the same)
-	if startLine > 0 {
-		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines above\n", startLine)))
-	}
-
-	for i := startLine; i < endLine; i++ {
-		line := m.lines[i]
-		isSelected := i == m.cursor
-
-		if line.Type == "log" {
-			content := line.Content
-			var style lipgloss.Style
-			if strings.Contains(content, "Error:") {
-				style = errorStyle
-			} else if strings.Contains(content, "Warning:") {
-				style = warningStyle
-			} else if strings.HasPrefix(content, "Initializing") {
-				style = importStyle
-			} else if strings.Contains(content, "Success!") || strings.Contains(content, "Creation complete") || strings.Contains(content, "Complete!") {
-				style = createStyle
-			} else if strings.Contains(content, "Enter a value:") {
-				style = forcesStyle
-			} else if strings.Contains(content, "Creating...") || strings.Contains(content, "Destruction complete") {
-				style = updateStyle
-			} else {
-				style = defaultStyle
-			}
-
-			if isSelected {
-				output.WriteString(selectedStyle.Render("► "+content) + "\n")
-			} else {
-				output.WriteString("  " + style.Render(content) + "\n")
-			}
-			continue
-		}
-
-		switch line.Type {
-		case "diagnostic":
-			diag := m.diagnostics[line.DiagIdx]
-			var style lipgloss.Style
-			var symbol string
-			if diag.Severity == "error" {
-				style = errorStyle
-				symbol = "✗"
-			} else {
-				style = warningStyle
-				symbol = "⚠"
-			}
-			expandIcon := "▸"
-			if diag.Expanded {
-				expandIcon = "▾"
-			}
-			content := fmt.Sprintf("%s %s %s", expandIcon, symbol, diag.Summary)
-			if isSelected {
-				content = selectedStyle.Render("► " + content)
-			} else {
-				content = "  " + style.Render(content)
-			}
-			output.WriteString(content + "\n")
-
-		case "diagnostic_detail":
-			diag := m.diagnostics[line.DiagIdx]
-			var style lipgloss.Style
-			if diag.Severity == "error" {
-				style = errorStyle
-			} else {
-				style = warningStyle
-			}
-			if isSelected {
-				output.WriteString(selectedStyle.Render("►   "+line.Content) + "\n")
-			} else {
-				output.WriteString("    " + style.Render(line.Content) + "\n")
-			}
-
-		case "resource":
-			rc := m.resources[line.ResourceIdx]
-			symbol := getSymbol(rc.Action)
-			style := getStyleForAction(rc.Action)
-			expandIcon := "▸"
-			if rc.Expanded {
-				expandIcon = "▾"
-			}
-			if isSelected {
-				selBg := lipgloss.Color("#45475a")
-				arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")).Background(selBg).Bold(true)
-				prefixStyle := style.Copy().Background(selBg)
-				prefix := prefixStyle.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
-				suffixStyle := dimStyle.Copy().Background(selBg)
-				suffix := suffixStyle.Render(rc.ActionText)
-				output.WriteString(fmt.Sprintf("%s%s %s\n", arrowStyle.Render("► "), prefix, suffix))
-			} else {
-				prefix := style.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
-				suffix := dimStyle.Render(rc.ActionText)
-				output.WriteString(fmt.Sprintf("  %s %s\n", prefix, suffix))
-			}
-
-		case "attribute":
-			attr := line.Content
-			styledAttr := styleAttribute(attr)
-			if isSelected {
-				output.WriteString(selectedStyle.Render("►   "+attr) + "\n")
-			} else {
-				output.WriteString("    " + styledAttr + "\n")
-			}
-		}
-	}
-
-	remaining := len(m.lines) - endLine
-	if remaining > 0 {
-		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines below\n", remaining)))
-	}
-
-	// Pinned Prompt
-	if m.prompt != "" {
-		promptLine := promptStyle.Render(">> " + m.prompt)
-		if m.inputMode {
-			// Show typing inline
-			promptLine += " " + createStyle.Render(m.userInput) + dimStyle.Render("█")
-		}
-		output.WriteString("\n" + promptLine)
-	}
-
-	if !m.showLogs {
-		output.WriteString("\n" + getSummary(m.resources, m.diagnostics))
-	} else {
-		output.WriteString(dimStyle.Render(fmt.Sprintf("\n%d lines", len(m.lines))))
-	}
-
-	return output.String()
+	return header + status + "  " + controls
 }
 
+// renderLine renders a single content line
+func (m Model) renderLine(idx int) string {
+	if idx < 0 || idx >= len(m.lines) {
+		return ""
+	}
+
+	line := m.lines[idx]
+	isSelected := idx == m.cursor
+
+	switch line.Type {
+	case LineTypeLog:
+		return m.renderLogLine(line.Content, isSelected)
+	case LineTypeDiagnostic:
+		return m.renderDiagnosticLine(line.DiagIdx, isSelected)
+	case LineTypeDiagnosticDetail:
+		return m.renderDiagnosticDetailLine(line.DiagIdx, line.Content, isSelected)
+	case LineTypeResource:
+		return m.renderResourceLine(line.ResourceIdx, isSelected)
+	case LineTypeAttribute:
+		return m.renderAttributeLine(line.Content, isSelected)
+	}
+
+	return ""
+}
+
+// renderLogLine renders a log line with contextual styling
+func (m Model) renderLogLine(content string, isSelected bool) string {
+	var style lipgloss.Style
+
+	switch {
+	case strings.Contains(content, "Error:"):
+		style = errorStyle
+	case strings.Contains(content, "Warning:"):
+		style = warningStyle
+	case strings.HasPrefix(content, "Initializing"):
+		style = importStyle
+	case strings.Contains(content, "Success!"),
+		strings.Contains(content, "Creation complete"),
+		strings.Contains(content, "Complete!"):
+		style = createStyle
+	case strings.Contains(content, "Enter a value:"):
+		style = forcesStyle
+	case strings.Contains(content, "Creating..."),
+		strings.Contains(content, "Destroying..."),
+		strings.Contains(content, "Modifying..."):
+		style = updateStyle
+	default:
+		style = defaultStyle
+	}
+
+	if isSelected {
+		return selectedStyle.Render("► " + content)
+	}
+	return "  " + style.Render(content)
+}
+
+// renderDiagnosticLine renders a diagnostic header line
+func (m Model) renderDiagnosticLine(diagIdx int, isSelected bool) string {
+	if diagIdx < 0 || diagIdx >= len(m.diagnostics) {
+		return ""
+	}
+
+	diag := m.diagnostics[diagIdx]
+	var style lipgloss.Style
+	var symbol string
+
+	if diag.Severity == "error" {
+		style = errorStyle
+		symbol = "✗"
+	} else {
+		style = warningStyle
+		symbol = "⚠"
+	}
+
+	expandIcon := "▸"
+	if diag.Expanded {
+		expandIcon = "▾"
+	}
+
+	content := fmt.Sprintf("%s %s %s", expandIcon, symbol, diag.Summary)
+	if isSelected {
+		return selectedStyle.Render("► " + content)
+	}
+	return "  " + style.Render(content)
+}
+
+// renderDiagnosticDetailLine renders a diagnostic detail line
+func (m Model) renderDiagnosticDetailLine(diagIdx int, content string, isSelected bool) string {
+	if diagIdx < 0 || diagIdx >= len(m.diagnostics) {
+		return ""
+	}
+
+	diag := m.diagnostics[diagIdx]
+	var style lipgloss.Style
+	if diag.Severity == "error" {
+		style = errorStyle
+	} else {
+		style = warningStyle
+	}
+
+	if isSelected {
+		return selectedStyle.Render("►   " + content)
+	}
+	return "    " + style.Render(content)
+}
+
+// renderResourceLine renders a resource header line
+func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
+	if resIdx < 0 || resIdx >= len(m.resources) {
+		return ""
+	}
+
+	rc := m.resources[resIdx]
+	symbol := getSymbol(rc.Action)
+	style := getStyleForAction(rc.Action)
+
+	expandIcon := "▸"
+	if rc.Expanded {
+		expandIcon = "▾"
+	}
+
+	if isSelected {
+		selBg := lipgloss.Color("#45475a")
+		arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")).Background(selBg).Bold(true)
+		prefixStyle := style.Background(selBg)
+		suffixStyle := dimStyle.Background(selBg)
+
+		prefix := prefixStyle.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
+		suffix := suffixStyle.Render(rc.ActionText)
+		return fmt.Sprintf("%s%s %s", arrowStyle.Render("► "), prefix, suffix)
+	}
+
+	prefix := style.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
+	suffix := dimStyle.Render(rc.ActionText)
+	return fmt.Sprintf("  %s %s", prefix, suffix)
+}
+
+// renderAttributeLine renders an attribute line with syntax highlighting
+func (m Model) renderAttributeLine(content string, isSelected bool) string {
+	if isSelected {
+		return selectedStyle.Render("►   " + content)
+	}
+	return "    " + styleAttribute(content)
+}
+
+// renderPrompt renders the pinned prompt with optional input cursor
+func (m Model) renderPrompt() string {
+	promptLine := promptStyle.Render(">> " + m.prompt)
+	if m.inputMode {
+		promptLine += " " + createStyle.Render(m.userInput) + dimStyle.Render("█")
+	}
+	return promptLine
+}
+
+// renderFooter renders the summary footer
+func (m Model) renderFooter() string {
+	if m.showLogs {
+		return dimStyle.Render(fmt.Sprintf("%d lines", len(m.lines)))
+	}
+	return getSummary(m.resources, m.diagnostics)
+}
+
+// styleAttribute applies syntax highlighting to an attribute line
 func styleAttribute(attr string) string {
-	// Check for "# forces replacement" - bold red like Terraform
-	if strings.Contains(attr, "# forces replacement") {
-		idx := strings.Index(attr, "# forces replacement")
+	// Special handling for "# forces replacement"
+	if idx := strings.Index(attr, "# forces replacement"); idx != -1 {
 		before := attr[:idx]
 		forces := "# forces replacement"
 		after := attr[idx+len(forces):]
-		// Style the attribute part normally, then forces in bold red
 		return styleAttributePrefix(before) + forcesStyle.Render(forces) + defaultStyle.Render(after)
 	}
-
 	return styleAttributePrefix(attr)
 }
 
+// styleAttributePrefix styles an attribute based on its prefix (+/-/~/etc)
 func styleAttributePrefix(attr string) string {
 	trimmed := strings.TrimSpace(attr)
 
-	// Style based on prefix
-	if strings.HasPrefix(trimmed, "+") {
+	switch {
+	case strings.HasPrefix(trimmed, "+"):
 		return addAttrStyle.Render(attr)
-	} else if strings.HasPrefix(trimmed, "-") {
+	case strings.HasPrefix(trimmed, "-"):
 		return removeAttrStyle.Render(attr)
-	} else if strings.HasPrefix(trimmed, "~") {
+	case strings.HasPrefix(trimmed, "~"):
 		return changeAttrStyle.Render(attr)
-	} else if strings.HasPrefix(trimmed, "#") {
-		// Comments in gray
+	case strings.HasPrefix(trimmed, "#"):
+		return dimStyle.Render(attr)
+	default:
 		return dimStyle.Render(attr)
 	}
-
-	// Unchanged attributes - gray/dim to reduce noise
-	return dimStyle.Render(attr)
 }
 
+// getSummary generates the summary line showing change counts
 func getSummary(resources []ResourceChange, diagnostics []Diagnostic) string {
 	var parts []string
 
 	// Count diagnostics
-	errorCount := 0
-	warningCount := 0
+	var errorCount, warningCount int
 	for _, d := range diagnostics {
 		if d.Severity == "error" {
 			errorCount++
@@ -891,11 +1020,12 @@ func getSummary(resources []ResourceChange, diagnostics []Diagnostic) string {
 	}
 
 	if len(parts) == 0 {
-		return "No changes"
+		return dimStyle.Render("No changes")
 	}
 	return strings.Join(parts, "  ")
 }
 
+// getSymbol returns the symbol for a given action type
 func getSymbol(action string) string {
 	switch action {
 	case "create":
@@ -913,6 +1043,7 @@ func getSymbol(action string) string {
 	}
 }
 
+// getStyleForAction returns the style for a given action type
 func getStyleForAction(action string) lipgloss.Style {
 	switch action {
 	case "create":
@@ -930,13 +1061,31 @@ func getStyleForAction(action string) lipgloss.Style {
 	}
 }
 
-var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`) // Note: Backslash needs to be escaped in JSON string
+// parseAction converts Terraform action text to internal action type
+func parseAction(actionText string) string {
+	switch actionText {
+	case "will be created":
+		return "create"
+	case "will be updated in-place":
+		return "update"
+	case "will be destroyed":
+		return "destroy"
+	case "must be replaced":
+		return "replace"
+	case "will be imported":
+		return "import"
+	default:
+		return ""
+	}
+}
 
+// stripANSI removes ANSI escape codes from a string
 func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
-func parseDiagnosticBlock(lines []string, errorPattern, warningPattern *regexp.Regexp) *Diagnostic {
+// parseDiagnosticBlock parses a diagnostic block into a Diagnostic struct
+func parseDiagnosticBlock(lines []string) *Diagnostic {
 	if len(lines) == 0 {
 		return nil
 	}
@@ -950,14 +1099,11 @@ func parseDiagnosticBlock(lines []string, errorPattern, warningPattern *regexp.R
 			continue
 		}
 
-		// Check for Error: or Warning: to determine severity and get summary
 		if match := errorPattern.FindStringSubmatch(trimmed); match != nil {
 			if severity == "" {
-				// First error becomes the summary
 				severity = "error"
 				summary = match[1]
 			} else {
-				// Additional errors go into details
 				details = append(details, trimmed)
 			}
 			continue
@@ -965,17 +1111,14 @@ func parseDiagnosticBlock(lines []string, errorPattern, warningPattern *regexp.R
 
 		if match := warningPattern.FindStringSubmatch(trimmed); match != nil {
 			if severity == "" {
-				// First warning becomes the summary
 				severity = "warning"
 				summary = match[1]
 			} else {
-				// Additional warnings go into details
 				details = append(details, trimmed)
 			}
 			continue
 		}
 
-		// After we have a severity, collect remaining lines as details
 		if severity != "" && i > 0 {
 			details = append(details, trimmed)
 		}
@@ -994,32 +1137,64 @@ func parseDiagnosticBlock(lines []string, errorPattern, warningPattern *regexp.R
 
 func main() {
 	var ptyFile *os.File
+	var cmd *exec.Cmd
 
-	// 1. Interactive Mode: terraui terraform apply ...
+	// Interactive mode: terraui terraform apply ...
 	if len(os.Args) > 1 {
-		// Run command in PTY
-		cmd := exec.Command(os.Args[1], os.Args[2:]...)
+		cmd = exec.Command(os.Args[1], os.Args[2:]...)
 		var err error
 		ptyFile, err = pty.Start(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error starting PTY: %v\n", err)
 			os.Exit(1)
 		}
-		defer func() {
-			ptyFile.Close() // Best effort close
-			cmd.Process.Kill()
-		}()
 	}
 
-	// 2. Default Mode: Pipe input
-	// If ptyFile is nil, Model will use os.Stdin
-
-	// Default: Show logs initially, autoscroll on
+	// Create model with buffered channel
 	m := Model{
 		showLogs:   true,
 		autoScroll: true,
 		ptyFile:    ptyFile,
+		streamChan: make(chan StreamMsg, streamBufferSize),
 	}
+
+	// Handle signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Cleanup function for PTY and process
+	cleanup := func() {
+		if ptyFile != nil {
+			ptyFile.Close()
+		}
+		if cmd != nil && cmd.Process != nil {
+			// Try graceful shutdown first
+			cmd.Process.Signal(syscall.SIGTERM)
+
+			// Wait with timeout
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+
+			select {
+			case <-done:
+				// Process exited cleanly
+			case <-time.After(processShutdownTimeout):
+				// Force kill if still running
+				cmd.Process.Kill()
+				<-done
+			}
+		}
+	}
+
+	// Start signal handler
+	go func() {
+		<-sigChan
+		cleanup()
+		os.Exit(0)
+	}()
+
+	// Ensure cleanup on normal exit
+	defer cleanup()
 
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
