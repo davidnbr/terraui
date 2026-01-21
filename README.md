@@ -23,13 +23,23 @@ Reviewing Terraform plans in the terminal can be overwhelming, especially with l
 - **Vim-style keybindings** - `j/k`, `Ctrl+u/d`, `g/G` for power users.
 - **Mouse support** - Click to select, scroll wheel to navigate.
 
+## How it looks
+
+### Terraform Apply
+
+![Terraui Apply Demo](https://github.com/user-attachments/assets/7a867f0c-6d93-4d8a-b377-ad624182b89c)
+
+### Terraform Plan
+
+![Terraui Plan Demo](https://github.com/user-attachments/assets/045a349d-dbce-4892-95b2-9e8d132fc974)
+
 ## Installation
 
 ### From source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/terraui.git
+git clone https://github.com/davidnbr/terraui.git
 cd terraui
 
 # Build
@@ -66,7 +76,7 @@ terraui terraform apply
 In interactive mode:
 
 1. Review the plan using navigation keys.
-2. When the **"Enter a value:"** prompt appears (pinned at the bottom), press `i` to enter **Input Mode**.
+2. When the **"Enter a value:"** prompt appears (pinned at the bottom), press **`i`** to enter **Input Mode**.
 3. Type `yes` and press `Enter`.
 4. The view will automatically switch to **Log View** and auto-scroll to show the creation progress.
 
@@ -124,29 +134,6 @@ Attributes within resources are also color-coded:
 - **Yellow** - Attribute being changed (`~ attribute = old -> new`)
 - **Dim gray** - Unchanged attributes (shown for context)
 
-## Example
-
-```
-PLAN Terraform Viewer  ● Live  ↑↓:navigate  q:quit  L:mode  i:enter input
-
-► ▾ ~ azurerm_postgresql_flexible_server.main
-    ~ administrator_login = (sensitive value)
-      id                  = "/subscriptions/.../flexibleServers/psql-staging"
-      name                = "psql-staging"
-    ~ tags = {
-        "Environment" = "staging"
-      + "Terraform"   = "true"
-      }
-    # (19 unchanged attributes hidden)
-  ▸ + aws_s3_bucket.new_bucket
-  ▸ - aws_instance.old_server
-  ▸ ← azurerm_storage_container.media
-
-  ↓ 12 more lines below
-
->> Enter a value:
-```
-
 ## Supported Terraform Versions
 
 `terraui` works with:
@@ -187,4 +174,3 @@ Built with:
 - [creack/pty](https://github.com/creack/pty) - PTY interface for Go
 
 Inspired by the Terraform Cloud plan UI.
-
