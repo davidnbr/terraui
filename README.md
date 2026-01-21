@@ -23,6 +23,12 @@ Reviewing Terraform plans in the terminal can be overwhelming, especially with l
 - **Vim-style keybindings** - `j/k`, `Ctrl+u/d`, `g/G` for power users.
 - **Mouse support** - Click to select, scroll wheel to navigate.
 
+## How it looks
+
+![Terraui Apply Demo](assets/terraui-apply.gif)
+
+![Terraui Plan Demo](assets/terraui-plan.gif)
+
 ## Installation
 
 ### From source
@@ -124,29 +130,6 @@ Attributes within resources are also color-coded:
 - **Yellow** - Attribute being changed (`~ attribute = old -> new`)
 - **Dim gray** - Unchanged attributes (shown for context)
 
-## Example
-
-```
-PLAN Terraform Viewer  ● Live  ↑↓:navigate  q:quit  L:mode  i:enter input
-
-► ▾ ~ azurerm_postgresql_flexible_server.main
-    ~ administrator_login = (sensitive value)
-      id                  = "/subscriptions/.../flexibleServers/psql-staging"
-      name                = "psql-staging"
-    ~ tags = {
-        "Environment" = "staging"
-      + "Terraform"   = "true"
-      }
-    # (19 unchanged attributes hidden)
-  ▸ + aws_s3_bucket.new_bucket
-  ▸ - aws_instance.old_server
-  ▸ ← azurerm_storage_container.media
-
-  ↓ 12 more lines below
-
->> Enter a value:
-```
-
 ## Supported Terraform Versions
 
 `terraui` works with:
@@ -187,4 +170,3 @@ Built with:
 - [creack/pty](https://github.com/creack/pty) - PTY interface for Go
 
 Inspired by the Terraform Cloud plan UI.
-
