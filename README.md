@@ -25,9 +25,9 @@ Reviewing Terraform plans in the terminal can be overwhelming, especially with l
 
 ## How it looks
 
-![Terraui Apply Demo](assets/terraui-apply.gif)
+![Terraui Apply Demo](https://github.com/user-attachments/assets/7a867f0c-6d93-4d8a-b377-ad624182b89c)
 
-![Terraui Plan Demo](assets/terraui-plan.gif)
+![Terraui Plan Demo](https://github.com/user-attachments/assets/045a349d-dbce-4892-95b2-9e8d132fc974)
 
 ## Installation
 
