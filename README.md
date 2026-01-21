@@ -39,7 +39,7 @@ Reviewing Terraform plans in the terminal can be overwhelming, especially with l
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/terraui.git
+git clone https://github.com/davidnbr/terraui.git
 cd terraui
 
 # Build
@@ -76,7 +76,7 @@ terraui terraform apply
 In interactive mode:
 
 1. Review the plan using navigation keys.
-2. When the **"Enter a value:"** prompt appears (pinned at the bottom), press `i` to enter **Input Mode**.
+2. When the **"Enter a value:"** prompt appears (pinned at the bottom), press **`i`** to enter **Input Mode**.
 3. Type `yes` and press `Enter`.
 4. The view will automatically switch to **Log View** and auto-scroll to show the creation progress.
 
