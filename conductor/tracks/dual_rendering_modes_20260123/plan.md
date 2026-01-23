@@ -2,7 +2,7 @@
 
 This plan follows the project's TDD-based workflow.
 
-## Phase 1: Infrastructure and State Management
+## Phase 1: Infrastructure and State Management [checkpoint: f41d3ef]
 Define the state and the toggle mechanism for the rendering modes.
 
 - [x] Task: Define rendering mode types and application state (cff8169)
@@ -11,7 +11,7 @@ Define the state and the toggle mechanism for the rendering modes.
 - [x] Task: Implement toggle keyboard shortcut (582af53)
     - [x] Write tests for handling the `m` key (or selected key) to toggle mode
     - [x] Update the `Update` function in the Bubble Tea model
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Infrastructure and State Management' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Infrastructure and State Management' (Protocol in workflow.md)
 
 ## Phase 2: Dashboard Mode Implementation
 Implement the standard Terraform color scheme and set it as default.
