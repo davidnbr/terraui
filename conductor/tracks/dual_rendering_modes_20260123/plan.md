@@ -5,9 +5,9 @@ This plan follows the project's TDD-based workflow.
 ## Phase 1: Infrastructure and State Management
 Define the state and the toggle mechanism for the rendering modes.
 
-- [ ] Task: Define rendering mode types and application state
-    - [ ] Write tests for state initialization and mode toggling logic
-    - [ ] Implement `RenderingMode` type and update the main model state
+- [x] Task: Define rendering mode types and application state (cff8169)
+    - [x] Write tests for state initialization and mode toggling logic
+    - [x] Implement `RenderingMode` type and update the main model state
 - [ ] Task: Implement toggle keyboard shortcut
     - [ ] Write tests for handling the `m` key (or selected key) to toggle mode
     - [ ] Update the `Update` function in the Bubble Tea model
