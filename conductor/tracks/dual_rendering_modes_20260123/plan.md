@@ -19,13 +19,13 @@ Implement the standard Terraform color scheme and set it as default.
 - [x] Task: Refactor styling logic to support multiple palettes (e298fb3)
     - [x] Write tests for a style provider that returns different styles based on the active mode
     - [x] Implement a style provider or theme manager
-- [ ] Task: Implement Dashboard (Standard Terraform) palette
-    - [ ] Write tests to verify correct color application for all resource change types in Dashboard mode
-    - [ ] Define the standard ANSI-like color palette for Dashboard mode
-- [ ] Task: Set Dashboard mode as the default starting mode
-    - [ ] Write tests to verify the initial state is Dashboard mode
-    - [ ] Update initialization logic
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Dashboard Mode Implementation' (Protocol in workflow.md)
+- [x] Task: Implement Dashboard (Standard Terraform) palette (f799a6c)
+    - [x] Write tests to verify correct color application for all resource change types in Dashboard mode
+    - [x] Define the standard ANSI-like color palette for Dashboard mode
+- [x] Task: Set Dashboard mode as the default starting mode (516d453)
+    - [x] Write tests to verify the initial state is Dashboard mode
+    - [x] Update initialization logic
+- [~] Task: Conductor - User Manual Verification 'Phase 2: Dashboard Mode Implementation' (Protocol in workflow.md)
 
 ## Phase 3: High-Contrast Mode Preservation and Final Polish
 Ensure the existing mode is preserved and the UI feels cohesive.
