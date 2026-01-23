@@ -16,9 +16,9 @@ Define the state and the toggle mechanism for the rendering modes.
 ## Phase 2: Dashboard Mode Implementation
 Implement the standard Terraform color scheme and set it as default.
 
-- [ ] Task: Refactor styling logic to support multiple palettes
-    - [ ] Write tests for a style provider that returns different styles based on the active mode
-    - [ ] Implement a style provider or theme manager
+- [x] Task: Refactor styling logic to support multiple palettes (e298fb3)
+    - [x] Write tests for a style provider that returns different styles based on the active mode
+    - [x] Implement a style provider or theme manager
 - [ ] Task: Implement Dashboard (Standard Terraform) palette
     - [ ] Write tests to verify correct color application for all resource change types in Dashboard mode
     - [ ] Define the standard ANSI-like color palette for Dashboard mode
