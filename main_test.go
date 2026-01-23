@@ -63,3 +63,13 @@ func TestThemeProvider(t *testing.T) {
 		// For the refactoring task, we just want to ensure the mechanism works.
 	}
 }
+
+func TestDashboardModeColors(t *testing.T) {
+	dashboardTheme := getTheme(RenderingModeDashboard)
+	highContrastTheme := getTheme(RenderingModeHighContrast)
+
+	// Verify they are different
+	if dashboardTheme.Create.GetForeground() == highContrastTheme.Create.GetForeground() {
+		t.Errorf("Dashboard and HighContrast themes should have different colors for 'Create'")
+	}
+}

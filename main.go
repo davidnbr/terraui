@@ -176,10 +176,9 @@ func getTheme(mode RenderingMode) Theme {
 	}
 
 	// Dashboard mode (mimics standard Terraform colors)
-	// For now, use slightly different colors to distinguish, will refine in next task
 	return Theme{
-		HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#444444")).Padding(0, 1),
-		HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#444444")).Padding(0, 1),
+		HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#333333")).Padding(0, 1),
+		HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#333333")).Padding(0, 1),
 		InputMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(lipgloss.Color("#00ff00")).Padding(0, 1),
 
 		Create:  lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Bold(true),
@@ -199,7 +198,7 @@ func getTheme(mode RenderingMode) Theme {
 
 		Dim:      lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")),
 		Default:  lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")),
-		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#333333")),
+		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#444444")),
 	}
 }
 
