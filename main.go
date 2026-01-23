@@ -175,30 +175,30 @@ func getTheme(mode RenderingMode) Theme {
 		}
 	}
 
-	// Dashboard mode (mimics standard Terraform colors)
+	// Dashboard mode (mimics standard Terraform colors but with Catppuccin palette)
 	return Theme{
-		HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#333333")).Padding(0, 1),
-		HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#333333")).Padding(0, 1),
-		InputMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#000000")).Background(lipgloss.Color("#00ff00")).Padding(0, 1),
+		HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1),
+		HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1),
+		InputMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1),
 
-		Create:  lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Bold(true),
-		Update:  lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")).Bold(true),
-		Destroy: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Bold(true),
-		Replace: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff00ff")).Bold(true),
-		Import:  lipgloss.NewStyle().Foreground(lipgloss.Color("#00ffff")).Bold(true),
+		Create:  lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true), // Green
+		Update:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true), // Yellow
+		Destroy: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true), // Red
+		Replace: lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true), // Mauve
+		Import:  lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true), // Sky
 
-		Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Bold(true),
-		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")).Bold(true),
-		Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#ff00ff")).Bold(true),
+		Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
+		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
+		Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
 
-		AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")),
-		RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")),
-		ChangeAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")),
-		Forces:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Bold(true),
+		AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
+		RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
+		ChangeAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")),
+		Forces:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
 
-		Dim:      lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")),
-		Default:  lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")),
-		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#444444")),
+		Dim:      lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")),
+		Default:  lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")),
+		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cdd6f4")).Background(lipgloss.Color("#45475a")),
 	}
 }
 
@@ -985,21 +985,39 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 		expandIcon = "▾"
 	}
 
+	// Format content based on mode
+	var content string
+	if m.renderingMode == RenderingModeHighContrast {
+		// High Contrast: Color the whole prefix (symbol + address)
+		content = style.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
+	} else {
+		// Dashboard: Color only the symbol
+		content = fmt.Sprintf("%s %s %s", expandIcon, style.Render(symbol), rc.Address)
+	}
+
 	if isSelected {
 		selBg := t.Selected.GetBackground()
 		arrowStyle := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true)
-		// Create new styles with background - don't modify originals
-		prefixStyle := lipgloss.NewStyle().Foreground(style.GetForeground()).Background(selBg).Bold(true)
+		
+		// For selected state, we need to handle background carefully
+		var prefix string
+		if m.renderingMode == RenderingModeHighContrast {
+			prefix = lipgloss.NewStyle().Foreground(style.GetForeground()).Background(selBg).Bold(true).Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
+		} else {
+			// In dashboard mode selected, keep address default color (but on selected bg) and symbol colored
+			symStyled := lipgloss.NewStyle().Foreground(style.GetForeground()).Background(selBg).Bold(true).Render(symbol)
+			addrStyled := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true).Render(rc.Address)
+			prefix = fmt.Sprintf("%s %s %s", expandIcon, symStyled, addrStyled)
+		}
+		
 		suffixStyle := lipgloss.NewStyle().Foreground(t.Dim.GetForeground()).Background(selBg)
-
-		prefix := prefixStyle.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
 		suffix := suffixStyle.Render(rc.ActionText)
+		
 		return fmt.Sprintf("%s%s %s", arrowStyle.Render("► "), prefix, suffix)
 	}
 
-	prefix := style.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
 	suffix := t.Dim.Render(rc.ActionText)
-	return fmt.Sprintf("  %s %s", prefix, suffix)
+	return fmt.Sprintf("  %s %s", content, suffix)
 }
 
 // renderAttributeLine renders an attribute line with syntax highlighting
@@ -1007,7 +1025,14 @@ func (m Model) renderAttributeLine(content string, isSelected bool) string {
 	if isSelected {
 		return m.theme().Selected.Render("►   " + content)
 	}
-	return "    " + m.styleAttribute(content)
+	
+	if m.renderingMode == RenderingModeHighContrast {
+		return "    " + m.styleAttribute(content)
+	}
+	
+	// Dashboard mode: minimal coloring
+	// Apply style only to the prefix/symbol
+	return "    " + m.styleAttributeMinimal(content)
 }
 
 // renderPrompt renders the pinned prompt with optional input cursor
@@ -1026,6 +1051,51 @@ func (m Model) renderFooter() string {
 		return m.theme().Dim.Render(fmt.Sprintf("%d lines", len(m.lines)))
 	}
 	return m.getSummary(m.resources, m.diagnostics)
+}
+
+// styleAttributeMinimal styles an attribute with minimal color (only symbols)
+func (m Model) styleAttributeMinimal(attr string) string {
+	t := m.theme()
+	trimmed := strings.TrimSpace(attr)
+	
+	// Special handling for "# forces replacement"
+	if idx := strings.Index(attr, "# forces replacement"); idx != -1 {
+		before := attr[:idx]
+		forces := "# forces replacement"
+		after := attr[idx+len(forces):]
+		return m.styleAttributeMinimal(before) + t.Forces.Render(forces) + t.Default.Render(after)
+	}
+
+	var symbol string
+	var style lipgloss.Style
+	
+	switch {
+	case strings.HasPrefix(trimmed, "+"):
+		symbol = "+"
+		style = t.AddAttr
+	case strings.HasPrefix(trimmed, "-"):
+		symbol = "-"
+		style = t.RemoveAttr
+	case strings.HasPrefix(trimmed, "~"):
+		symbol = "~"
+		style = t.ChangeAttr
+	case strings.HasPrefix(trimmed, "#"):
+		return t.Dim.Render(attr)
+	default:
+		return t.Dim.Render(attr)
+	}
+
+	// Reconstruct the string with only symbol colored
+	// Find the symbol index in the original string to preserve whitespace
+	idx := strings.Index(attr, symbol)
+	if idx == -1 {
+		return attr // Fallback
+	}
+	
+	prefix := attr[:idx]
+	suffix := attr[idx+len(symbol):]
+	
+	return prefix + style.Render(symbol) + t.Dim.Render(suffix)
 }
 
 // styleAttribute applies syntax highlighting to an attribute line

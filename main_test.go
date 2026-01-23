@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func TestRenderingModeToggle(t *testing.T) {
@@ -68,9 +70,40 @@ func TestDashboardModeColors(t *testing.T) {
 	dashboardTheme := getTheme(RenderingModeDashboard)
 	highContrastTheme := getTheme(RenderingModeHighContrast)
 
-	// Verify they are different
-	if dashboardTheme.Create.GetForeground() == highContrastTheme.Create.GetForeground() {
-		t.Errorf("Dashboard and HighContrast themes should have different colors for 'Create'")
+	// Palettes should be identical now (Catppuccin everywhere)
+	if dashboardTheme.Create.GetForeground() != highContrastTheme.Create.GetForeground() {
+		t.Errorf("Dashboard and HighContrast themes should share the same palette")
+	}
+}
+
+func TestRenderingModeLogic(t *testing.T) {
+	// Force color output for testing
+	lipgloss.SetColorProfile(termenv.TrueColor)
+
+	// Verify that the rendering logic produces different output for different modes
+	// even with the same palette.
+	
+	// Setup a model with a resource
+	m := Model{
+		renderingMode: RenderingModeDashboard,
+		resources: []ResourceChange{
+			{
+				Address: "test_resource",
+				Action: "create",
+				ActionText: "will be created",
+			},
+		},
+	}
+	
+	// Dashboard mode rendering
+	dashboardOutput := m.renderResourceLine(0, false)
+	
+	// Switch to HighContrast
+	m.renderingMode = RenderingModeHighContrast
+	highContrastOutput := m.renderResourceLine(0, false)
+	
+	if dashboardOutput == highContrastOutput {
+		t.Error("Dashboard and HighContrast modes should produce different output strings")
 	}
 }
 
