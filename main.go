@@ -588,6 +588,9 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.offset = 0
 		m.autoScroll = false
 
+	case "m":
+		m.toggleRenderingMode()
+
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
