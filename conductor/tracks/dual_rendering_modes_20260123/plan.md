@@ -8,9 +8,9 @@ Define the state and the toggle mechanism for the rendering modes.
 - [x] Task: Define rendering mode types and application state (cff8169)
     - [x] Write tests for state initialization and mode toggling logic
     - [x] Implement `RenderingMode` type and update the main model state
-- [ ] Task: Implement toggle keyboard shortcut
-    - [ ] Write tests for handling the `m` key (or selected key) to toggle mode
-    - [ ] Update the `Update` function in the Bubble Tea model
+- [x] Task: Implement toggle keyboard shortcut (582af53)
+    - [x] Write tests for handling the `m` key (or selected key) to toggle mode
+    - [x] Update the `Update` function in the Bubble Tea model
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Infrastructure and State Management' (Protocol in workflow.md)
 
 ## Phase 2: Dashboard Mode Implementation
