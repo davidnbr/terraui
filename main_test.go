@@ -73,3 +73,12 @@ func TestDashboardModeColors(t *testing.T) {
 		t.Errorf("Dashboard and HighContrast themes should have different colors for 'Create'")
 	}
 }
+
+func TestInitialRenderingMode(t *testing.T) {
+	m := Model{}
+	// Note: In Go, int default is 0, which is RenderingModeDashboard.
+	// But it's good to be explicit in our code.
+	if m.renderingMode != RenderingModeDashboard {
+		t.Errorf("expected initial rendering mode to be Dashboard, got %v", m.renderingMode)
+	}
+}
