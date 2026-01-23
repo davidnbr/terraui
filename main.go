@@ -41,6 +41,14 @@ const (
 	LineTypeLog
 )
 
+// RenderingMode represents the active color palette
+type RenderingMode int
+
+const (
+	RenderingModeDashboard RenderingMode = iota
+	RenderingModeHighContrast
+)
+
 // ResourceChange represents a single resource change from terraform plan
 type ResourceChange struct {
 	Address    string   // Resource address (e.g., "aws_instance.web")
@@ -92,10 +100,11 @@ type Model struct {
 	height     int  // Terminal height
 	offset     int  // Scroll offset
 	ready      bool // Whether initial size is known
-	showLogs   bool // Toggle between log view and plan view
-	autoScroll bool // Auto-scroll to bottom on new content
-	done       bool // Input stream finished
-	needsSync  bool // Pending rebuild of lines slice
+	showLogs      bool // Toggle between log view and plan view
+	autoScroll    bool // Auto-scroll to bottom on new content
+	renderingMode RenderingMode
+	done          bool // Input stream finished
+	needsSync     bool // Pending rebuild of lines slice
 
 	// PTY/Interactive mode
 	ptyFile   *os.File
@@ -447,6 +456,15 @@ func (m *Model) clampOffset() {
 	}
 	if m.offset > maxOffset {
 		m.offset = maxOffset
+	}
+}
+
+// toggleRenderingMode switches between Dashboard and HighContrast modes
+func (m *Model) toggleRenderingMode() {
+	if m.renderingMode == RenderingModeDashboard {
+		m.renderingMode = RenderingModeHighContrast
+	} else {
+		m.renderingMode = RenderingModeDashboard
 	}
 }
 
@@ -1153,10 +1171,11 @@ func main() {
 
 	// Create model with buffered channel
 	m := Model{
-		showLogs:   true,
-		autoScroll: true,
-		ptyFile:    ptyFile,
-		streamChan: make(chan StreamMsg, streamBufferSize),
+		showLogs:      true,
+		autoScroll:    true,
+		renderingMode: RenderingModeDashboard,
+		ptyFile:       ptyFile,
+		streamChan:    make(chan StreamMsg, streamBufferSize),
 	}
 
 	// Handle signals for graceful shutdown
