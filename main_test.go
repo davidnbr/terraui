@@ -115,3 +115,13 @@ func TestInitialRenderingMode(t *testing.T) {
 		t.Errorf("expected initial rendering mode to be Dashboard, got %v", m.renderingMode)
 	}
 }
+
+func TestHighContrastPalette(t *testing.T) {
+	theme := getTheme(RenderingModeHighContrast)
+	
+	// Verify it uses Catppuccin-like colors (Mocha)
+	expectedGreen := lipgloss.Color("#a6e3a1")
+	if theme.Create.GetForeground() != expectedGreen {
+		t.Errorf("expected HighContrast Create foreground to be %v, got %v", expectedGreen, theme.Create.GetForeground())
+	}
+}
