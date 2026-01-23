@@ -30,10 +30,10 @@ Implement the standard Terraform color scheme and set it as default.
 ## Phase 3: High-Contrast Mode Preservation and Final Polish
 Ensure the existing mode is preserved and the UI feels cohesive.
 
-- [ ] Task: Integrate High-Contrast palette into the new styling system
-    - [ ] Write tests to verify Catppuccin colors are applied when High-Contrast mode is active
-    - [ ] Map existing styling logic to the new theme manager
-- [ ] Task: Update Top Hint Bar to reflect the new toggle
-    - [ ] Write tests to verify the Hint Bar displays the toggle key
-    - [ ] Update the UI rendering of the header/hint bar
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: High-Contrast Mode Preservation and Final Polish' (Protocol in workflow.md)
+- [x] Task: Integrate High-Contrast palette into the new styling system (38e7ebc)
+    - [x] Write tests to verify Catppuccin colors are applied when High-Contrast mode is active
+    - [x] Map existing styling logic to the new theme manager
+- [x] Task: Update Top Hint Bar to reflect the new toggle (a555e16)
+    - [x] Write tests to verify the Hint Bar displays the toggle key
+    - [x] Update the UI rendering of the header/hint bar
+- [~] Task: Conductor - User Manual Verification 'Phase 3: High-Contrast Mode Preservation and Final Polish' (Protocol in workflow.md)
