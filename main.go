@@ -992,7 +992,7 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 		content = style.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
 	} else {
 		// Dashboard: Color only the symbol
-		content = fmt.Sprintf("%s %s %s", expandIcon, style.Render(symbol), rc.Address)
+		content = fmt.Sprintf("%s %s %s", expandIcon, style.Render(symbol), t.Default.Render(rc.Address))
 	}
 
 	if isSelected {
@@ -1095,7 +1095,7 @@ func (m Model) styleAttributeMinimal(attr string) string {
 	prefix := attr[:idx]
 	suffix := attr[idx+len(symbol):]
 	
-	return prefix + style.Render(symbol) + t.Dim.Render(suffix)
+	return prefix + style.Render(symbol) + t.Default.Render(suffix)
 }
 
 // styleAttribute applies syntax highlighting to an attribute line
