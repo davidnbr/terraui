@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -123,5 +124,14 @@ func TestHighContrastPalette(t *testing.T) {
 	expectedGreen := lipgloss.Color("#a6e3a1")
 	if theme.Create.GetForeground() != expectedGreen {
 		t.Errorf("expected HighContrast Create foreground to be %v, got %v", expectedGreen, theme.Create.GetForeground())
+	}
+}
+
+func TestHeaderHintBar(t *testing.T) {
+	m := Model{ready: true}
+	header := m.renderHeader()
+	
+	if !strings.Contains(header, "m:toggle colors") {
+		t.Errorf("expected header to contain 'm:toggle colors', got %q", header)
 	}
 }
