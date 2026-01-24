@@ -57,3 +57,16 @@ func TestRichFormattingRendering(t *testing.T) {
 		t.Error("Underline line should contain ANSI codes")
 	}
 }
+
+func TestANSIUnderlinePreservation(t *testing.T) {
+	input := "   3: provider \"aws\" \x1b[4m{\x1b[0m"
+	sanitized := sanitizeTerraformANSI(input)
+	
+	// Should contain [4m and [22;24m
+	if !strings.Contains(sanitized, "\x1b[4m") {
+		t.Errorf("Expected preserved underline code [4m, got %q", sanitized)
+	}
+	if !strings.Contains(sanitized, "\x1b[22;24m") {
+		t.Errorf("Expected converted reset code [22;24m, got %q", sanitized)
+	}
+}

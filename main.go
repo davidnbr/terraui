@@ -231,6 +231,8 @@ var (
 	markerPattern  = regexp.MustCompile(`^\s*on\s+.+\s+line\s+\d+`)
 	underlinePattern = regexp.MustCompile(`^\s*[\^~]+`)
 	ansiPattern    = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	ansiColorPattern = regexp.MustCompile(`\x1b\[(?:3[0-9]|4[0-9]|9[0-9]|10[0-9]|38;[0-9;]+|48;[0-9;]+)m`)
+	ansiResetPattern = regexp.MustCompile(`\x1b\[0m`)
 )
 
 // Init implements tea.Model. Starts input reading and periodic ticks.
@@ -266,6 +268,7 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 
 	processLine := func(rawLine string) {
 		line := stripANSI(rawLine)
+		richLine := sanitizeTerraformANSI(rawLine)
 
 		// Diagnostic block handling
 		if strings.HasPrefix(line, "╷") {
@@ -289,7 +292,7 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 			return
 		}
 		if inDiagnostic {
-			content := strings.TrimPrefix(line, "│")
+			content := strings.TrimPrefix(richLine, "│")
 			diagLines = append(diagLines, content)
 			return
 		}
@@ -1048,6 +1051,7 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 
 	t := m.theme()
 	content := line.Content
+	cleanContent := stripANSI(content)
 
 	var guideStyle lipgloss.Style
 	if diag.Severity == "error" {
@@ -1057,7 +1061,7 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	}
 
 	// 1. Color structural guides (│, ├, ─, ╵)
-	if strings.ContainsAny(content, "│├─╵") {
+	if strings.ContainsAny(cleanContent, "│├─╵") {
 		content = strings.ReplaceAll(content, "│", guideStyle.Render("│"))
 		content = strings.ReplaceAll(content, "├", guideStyle.Render("├"))
 		content = strings.ReplaceAll(content, "─", guideStyle.Render("─"))
@@ -1065,10 +1069,13 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	}
 
 	// 2. Color and UNDERLINE marker lines (^ or ~ markers)
-	if underlinePattern.MatchString(content) {
+	if underlinePattern.MatchString(cleanContent) {
 		// Use the dedicated Underline style (Red/Bold/Underlined)
-		content = strings.ReplaceAll(content, "^", t.Underline.Render("^"))
-		content = strings.ReplaceAll(content, "~", t.Underline.Render("~"))
+		// We style the markers while preserving indentation
+		trimmedMarker := strings.TrimSpace(cleanContent)
+		styledMarker := t.Underline.Render(trimmedMarker)
+		// Re-apply to the rich content string
+		content = strings.Replace(content, trimmedMarker, styledMarker, 1)
 	}
 
 	// 3. Bold and UNDERLINE location markers ("on file.tf line X:")
@@ -1079,6 +1086,7 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	// 4. Apply mode-specific final wrapping
 	if m.renderingMode == RenderingModeHighContrast {
 		// In High Contrast, the entire line inherits the severity color
+		// Wrap in base style, preserving existing ANSI formatting (bold/underline)
 		content = guideStyle.Render(content)
 	}
 
@@ -1441,6 +1449,17 @@ func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
+// sanitizeTerraformANSI preserves formatting (bold, underline) but removes colors.
+// It also converts Reset ([0m) to reset-formatting-only ([22;24m) to avoid
+// breaking our theme colors.
+func sanitizeTerraformANSI(s string) string {
+	// 1. Convert Reset to Bold/Underline off only
+	s = ansiResetPattern.ReplaceAllString(s, "\x1b[22;24m")
+	// 2. Strip color codes
+	s = ansiColorPattern.ReplaceAllString(s, "")
+	return s
+}
+
 // parseDiagnosticBlock parses a diagnostic block into a Diagnostic struct
 func parseDiagnosticBlock(lines []string) *Diagnostic {
 	if len(lines) == 0 {
@@ -1451,7 +1470,10 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 	var details []DiagnosticLine
 
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		// Clean text for regex matching and empty line detection
+		cleanLine := stripANSI(line)
+		trimmed := strings.TrimSpace(cleanLine)
+		
 		if trimmed == "" {
 			// Keep empty lines for spacing, but don't parse them as headers
 			if severity != "" {
@@ -1460,7 +1482,7 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 			continue
 		}
 
-		// Use the original line with preserved indentation for content
+		// Use the line with preserved indentation and rich formatting (bold/underline)
 		// We remove one leading space if present, as it's usually the space after '│'
 		content := line
 		if strings.HasPrefix(content, " ") {
