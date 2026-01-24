@@ -37,3 +37,6 @@ go.work.sum
 # Terraform
 terraform
 *.tfvars.local
+
+# Conductor
+conductor/
