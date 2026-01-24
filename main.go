@@ -203,15 +203,15 @@ func getTheme(mode RenderingMode) Theme {
 		Replace: lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true), // Mauve
 		Import:  lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true), // Sky
 
-		Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Bold(true),
-		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")).Bold(true),
-		Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#ff00ff")).Bold(true),
+		Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
+		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
+		Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
 
-		BoldError:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Bold(true),
-		BoldWarning: lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")).Bold(true),
-		Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")),
+		BoldError:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
+		BoldWarning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
+		Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
 
-		AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")),
+		AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
 		RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
 		ChangeAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")),
 		Forces:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
