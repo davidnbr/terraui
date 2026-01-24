@@ -61,7 +61,7 @@ func TestThemeProvider(t *testing.T) {
 	// In Dashboard mode, create should be green, but might be different from Catppuccin green
 	// For now, let's just ensure they are defined and potentially different if we have values
 	if dashboardTheme.Create.GetForeground() == highContrastTheme.Create.GetForeground() {
-		// This might be true initially if we haven't defined different colors, 
+		// This might be true initially if we haven't defined different colors,
 		// but eventually they should differ.
 		// For the refactoring task, we just want to ensure the mechanism works.
 	}
@@ -83,26 +83,26 @@ func TestRenderingModeLogic(t *testing.T) {
 
 	// Verify that the rendering logic produces different output for different modes
 	// even with the same palette.
-	
+
 	// Setup a model with a resource
 	m := Model{
 		renderingMode: RenderingModeDashboard,
 		resources: []ResourceChange{
 			{
-				Address: "test_resource",
-				Action: "create",
+				Address:    "test_resource",
+				Action:     "create",
 				ActionText: "will be created",
 			},
 		},
 	}
-	
+
 	// Dashboard mode rendering
 	dashboardOutput := m.renderResourceLine(0, false)
-	
+
 	// Switch to HighContrast
 	m.renderingMode = RenderingModeHighContrast
 	highContrastOutput := m.renderResourceLine(0, false)
-	
+
 	if dashboardOutput == highContrastOutput {
 		t.Error("Dashboard and HighContrast modes should produce different output strings")
 	}
@@ -119,7 +119,7 @@ func TestInitialRenderingMode(t *testing.T) {
 
 func TestHighContrastPalette(t *testing.T) {
 	theme := getTheme(RenderingModeHighContrast)
-	
+
 	// Verify it uses Catppuccin-like colors (Mocha)
 	expectedGreen := lipgloss.Color("#a6e3a1")
 	if theme.Create.GetForeground() != expectedGreen {
@@ -130,7 +130,7 @@ func TestHighContrastPalette(t *testing.T) {
 func TestHeaderHintBar(t *testing.T) {
 	m := Model{ready: true}
 	header := m.renderHeader()
-	
+
 	if !strings.Contains(header, "m:toggle colors") {
 		t.Errorf("expected header to contain 'm:toggle colors', got %q", header)
 	}

@@ -122,10 +122,10 @@ type Model struct {
 	lines       []Line // Computed display lines based on expand state
 
 	// UI state
-	cursor     int  // Current line index
-	height     int  // Terminal height
-	offset     int  // Scroll offset
-	ready      bool // Whether initial size is known
+	cursor        int  // Current line index
+	height        int  // Terminal height
+	offset        int  // Scroll offset
+	ready         bool // Whether initial size is known
 	showLogs      bool // Toggle between log view and plan view
 	autoScroll    bool // Auto-scroll to bottom on new content
 	renderingMode RenderingMode
@@ -998,7 +998,7 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 	if isSelected {
 		selBg := t.Selected.GetBackground()
 		arrowStyle := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true)
-		
+
 		// For selected state, we need to handle background carefully
 		var prefix string
 		if m.renderingMode == RenderingModeHighContrast {
@@ -1009,10 +1009,10 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 			addrStyled := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true).Render(rc.Address)
 			prefix = fmt.Sprintf("%s %s %s", expandIcon, symStyled, addrStyled)
 		}
-		
+
 		suffixStyle := lipgloss.NewStyle().Foreground(t.Dim.GetForeground()).Background(selBg)
 		suffix := suffixStyle.Render(rc.ActionText)
-		
+
 		return fmt.Sprintf("%s%s %s", arrowStyle.Render("► "), prefix, suffix)
 	}
 
@@ -1024,7 +1024,7 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 		// High Contrast: Dim the action text
 		suffix = t.Dim.Render(rc.ActionText)
 	}
-	
+
 	return fmt.Sprintf("  %s %s", content, suffix)
 }
 
@@ -1033,11 +1033,11 @@ func (m Model) renderAttributeLine(content string, isSelected bool) string {
 	if isSelected {
 		return m.theme().Selected.Render("►   " + content)
 	}
-	
+
 	if m.renderingMode == RenderingModeHighContrast {
 		return "    " + m.styleAttribute(content)
 	}
-	
+
 	// Dashboard mode: minimal coloring
 	// Apply style only to the prefix/symbol
 	return "    " + m.styleAttributeMinimal(content)
@@ -1065,7 +1065,7 @@ func (m Model) renderFooter() string {
 func (m Model) styleAttributeMinimal(attr string) string {
 	t := m.theme()
 	trimmed := strings.TrimSpace(attr)
-	
+
 	// Special handling for "# forces replacement"
 	if idx := strings.Index(attr, "# forces replacement"); idx != -1 {
 		before := attr[:idx]
@@ -1076,7 +1076,7 @@ func (m Model) styleAttributeMinimal(attr string) string {
 
 	var symbol string
 	var style lipgloss.Style
-	
+
 	switch {
 	case strings.HasPrefix(trimmed, "+"):
 		symbol = "+"
@@ -1099,10 +1099,10 @@ func (m Model) styleAttributeMinimal(attr string) string {
 	if idx == -1 {
 		return attr // Fallback
 	}
-	
+
 	prefix := attr[:idx]
 	rawSuffix := attr[idx+len(symbol):]
-	
+
 	// Highlight arrows "->"
 	var suffix string
 	if strings.Contains(rawSuffix, "->") {
@@ -1116,7 +1116,7 @@ func (m Model) styleAttributeMinimal(attr string) string {
 	} else {
 		suffix = t.Default.Render(rawSuffix)
 	}
-	
+
 	return prefix + style.Render(symbol) + suffix
 }
 
