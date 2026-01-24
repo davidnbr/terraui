@@ -1016,7 +1016,15 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 		return fmt.Sprintf("%s%s %s", arrowStyle.Render("► "), prefix, suffix)
 	}
 
-	suffix := t.Dim.Render(rc.ActionText)
+	var suffix string
+	if m.renderingMode == RenderingModeDashboard {
+		// Dashboard: Color the action text (e.g. "will be updated in-place")
+		suffix = style.Render(rc.ActionText)
+	} else {
+		// High Contrast: Dim the action text
+		suffix = t.Dim.Render(rc.ActionText)
+	}
+	
 	return fmt.Sprintf("  %s %s", content, suffix)
 }
 
@@ -1093,9 +1101,23 @@ func (m Model) styleAttributeMinimal(attr string) string {
 	}
 	
 	prefix := attr[:idx]
-	suffix := attr[idx+len(symbol):]
+	rawSuffix := attr[idx+len(symbol):]
 	
-	return prefix + style.Render(symbol) + t.Default.Render(suffix)
+	// Highlight arrows "->"
+	var suffix string
+	if strings.Contains(rawSuffix, "->") {
+		parts := strings.Split(rawSuffix, "->")
+		for i, part := range parts {
+			if i > 0 {
+				suffix += style.Render("->")
+			}
+			suffix += t.Default.Render(part)
+		}
+	} else {
+		suffix = t.Default.Render(rawSuffix)
+	}
+	
+	return prefix + style.Render(symbol) + suffix
 }
 
 // styleAttribute applies syntax highlighting to an attribute line
