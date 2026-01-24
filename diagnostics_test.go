@@ -13,13 +13,13 @@ func TestLongDiagnosticMessage(t *testing.T) {
 	m := &Model{
 		streamChan: make(chan StreamMsg, 10),
 	}
-	
+
 	// Construct a massive diagnostic message
 	longLine := strings.Repeat("A", 10000)
 	longSummary := "Error: " + longLine
-	
+
 	input := "╷\n│ " + longSummary + "\n│ \n│ Detail line 1\n│ " + longLine + "\n╵\n"
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -43,7 +43,7 @@ func TestLongDiagnosticMessage(t *testing.T) {
 	if len(diagnostic.Summary) != 10000 {
 		t.Errorf("expected summary length 10000, got %d", len(diagnostic.Summary))
 	}
-	
+
 	// Check details
 	foundLongDetail := false
 	for _, d := range diagnostic.Detail {
@@ -52,7 +52,7 @@ func TestLongDiagnosticMessage(t *testing.T) {
 			break
 		}
 	}
-	
+
 	if !foundLongDetail {
 		t.Error("expected to find long detail line of length 10000")
 	}
@@ -70,9 +70,9 @@ func TestDiagnosticSummaryWrapping(t *testing.T) {
 			},
 		},
 	}
-	
+
 	m.rebuildLines()
-	
+
 	if len(m.lines) == 1 {
 		t.Error("Diagnostic summary was not wrapped")
 	}
@@ -104,11 +104,11 @@ func TestRealWorldDiagnosticParsing(t *testing.T) {
 	if diagnostic == nil {
 		t.Fatal("expected diagnostic to be parsed")
 	}
-	
+
 	if diagnostic.Summary != "Invalid value for variable" {
 		t.Errorf("expected summary 'Invalid value for variable', got %q", diagnostic.Summary)
 	}
-	
+
 	// Check that details contain the Lorem ipsum text
 	foundLorem := false
 	for _, d := range diagnostic.Detail {
