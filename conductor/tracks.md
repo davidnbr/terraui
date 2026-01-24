@@ -7,6 +7,3 @@ This file tracks all major tracks for the project. Each track has its own detail
 ---
 
 ---
-
-- [x] **Track: Implement Text Wrapping for Large Plan Outputs**
-*Link: [./tracks/text_wrapping_20260123/](./tracks/text_wrapping_20260123/)*
