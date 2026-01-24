@@ -41,6 +41,40 @@ const (
 	LineTypeLog
 )
 
+// RenderingMode represents the active color palette
+type RenderingMode int
+
+const (
+	RenderingModeDashboard RenderingMode = iota
+	RenderingModeHighContrast
+)
+
+// Theme holds the styles for a rendering mode
+type Theme struct {
+	HeaderPlan lipgloss.Style
+	HeaderLog  lipgloss.Style
+	InputMode  lipgloss.Style
+
+	Create  lipgloss.Style
+	Update  lipgloss.Style
+	Destroy lipgloss.Style
+	Replace lipgloss.Style
+	Import  lipgloss.Style
+
+	Error   lipgloss.Style
+	Warning lipgloss.Style
+	Prompt  lipgloss.Style
+
+	AddAttr    lipgloss.Style
+	RemoveAttr lipgloss.Style
+	ChangeAttr lipgloss.Style
+	Forces     lipgloss.Style
+
+	Dim      lipgloss.Style
+	Default  lipgloss.Style
+	Selected lipgloss.Style
+}
+
 // ResourceChange represents a single resource change from terraform plan
 type ResourceChange struct {
 	Address    string   // Resource address (e.g., "aws_instance.web")
@@ -88,14 +122,15 @@ type Model struct {
 	lines       []Line // Computed display lines based on expand state
 
 	// UI state
-	cursor     int  // Current line index
-	height     int  // Terminal height
-	offset     int  // Scroll offset
-	ready      bool // Whether initial size is known
-	showLogs   bool // Toggle between log view and plan view
-	autoScroll bool // Auto-scroll to bottom on new content
-	done       bool // Input stream finished
-	needsSync  bool // Pending rebuild of lines slice
+	cursor        int  // Current line index
+	height        int  // Terminal height
+	offset        int  // Scroll offset
+	ready         bool // Whether initial size is known
+	showLogs      bool // Toggle between log view and plan view
+	autoScroll    bool // Auto-scroll to bottom on new content
+	renderingMode RenderingMode
+	done          bool // Input stream finished
+	needsSync     bool // Pending rebuild of lines slice
 
 	// PTY/Interactive mode
 	ptyFile   *os.File
@@ -108,36 +143,64 @@ type Model struct {
 	cancelFunc context.CancelFunc // For signaling goroutine shutdown
 }
 
-// Styles using Catppuccin Mocha color palette
-var (
-	// Header badges
-	headerPlanStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1)
-	headerLogStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1)
-	inputModeStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1)
+func (m *Model) theme() Theme {
+	return getTheme(m.renderingMode)
+}
 
-	// Resource action colors (bold for headers)
-	createStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true) // Green
-	updateStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true) // Yellow
-	destroyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Red
-	replaceStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true) // Mauve
-	importStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true) // Sky
+func getTheme(mode RenderingMode) Theme {
+	if mode == RenderingModeHighContrast {
+		return Theme{
+			HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1),
+			HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1),
+			InputMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1),
 
-	// Diagnostic colors
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Red
-	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true) // Peach
-	promptStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true) // Pink
+			Create:  lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true),
+			Update:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true),
+			Destroy: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
+			Replace: lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true),
+			Import:  lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true),
 
-	// Attribute colors (non-bold for content)
-	addAttrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1"))            // Green
-	removeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555"))            // Red
-	changeAttrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af"))            // Yellow
-	forcesStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true) // Red bold
+			Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
+			Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
+			Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
 
-	// UI chrome colors
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c"))            // Gray
-	defaultStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4"))            // Text
-	selectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cdd6f4")).Background(lipgloss.Color("#45475a")) // Highlight
-)
+			AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
+			RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
+			ChangeAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")),
+			Forces:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
+
+			Dim:      lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")),
+			Default:  lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")),
+			Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cdd6f4")).Background(lipgloss.Color("#45475a")),
+		}
+	}
+
+	// Dashboard mode (mimics standard Terraform colors but with Catppuccin palette)
+	return Theme{
+		HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1),
+		HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1),
+		InputMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1),
+
+		Create:  lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true), // Green
+		Update:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true), // Yellow
+		Destroy: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true), // Red
+		Replace: lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true), // Mauve
+		Import:  lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true), // Sky
+
+		Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
+		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
+		Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
+
+		AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
+		RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
+		ChangeAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")),
+		Forces:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
+
+		Dim:      lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")),
+		Default:  lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")),
+		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cdd6f4")).Background(lipgloss.Color("#45475a")),
+	}
+}
 
 // Pre-compiled regex patterns for parsing
 var (
@@ -450,6 +513,15 @@ func (m *Model) clampOffset() {
 	}
 }
 
+// toggleRenderingMode switches between Dashboard and HighContrast modes
+func (m *Model) toggleRenderingMode() {
+	if m.renderingMode == RenderingModeDashboard {
+		m.renderingMode = RenderingModeHighContrast
+	} else {
+		m.renderingMode = RenderingModeDashboard
+	}
+}
+
 // Update implements tea.Model. Handles all messages and user input.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -569,6 +641,9 @@ func (m Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.offset = 0
 		m.autoScroll = false
+
+	case "m":
+		m.toggleRenderingMode()
 
 	case "up", "k":
 		if m.cursor > 0 {
@@ -725,7 +800,7 @@ func (m Model) View() string {
 
 	// Scroll indicator (top)
 	if startLine > 0 {
-		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more lines above\n", startLine)))
+		output.WriteString(m.theme().Dim.Render(fmt.Sprintf("  ↑ %d more lines above\n", startLine)))
 	}
 
 	// Content lines
@@ -736,7 +811,7 @@ func (m Model) View() string {
 
 	// Scroll indicator (bottom)
 	if remaining := len(m.lines) - endLine; remaining > 0 {
-		output.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more lines below\n", remaining)))
+		output.WriteString(m.theme().Dim.Render(fmt.Sprintf("  ↓ %d more lines below\n", remaining)))
 	}
 
 	// Pinned prompt
@@ -754,30 +829,31 @@ func (m Model) View() string {
 
 // renderHeader renders the header bar with mode, status, and controls
 func (m Model) renderHeader() string {
+	t := m.theme()
 	var header string
 	if m.inputMode {
-		header = inputModeStyle.Render("INPUT") + " " + dimStyle.Render("Interactive Mode")
+		header = t.InputMode.Render("INPUT") + " " + t.Dim.Render("Interactive Mode")
 	} else if m.showLogs {
-		header = headerLogStyle.Render("LOGS") + " " + dimStyle.Render("Terraform Output")
+		header = t.HeaderLog.Render("LOGS") + " " + t.Dim.Render("Terraform Output")
 	} else {
-		header = headerPlanStyle.Render("PLAN") + " " + dimStyle.Render("Terraform Viewer")
+		header = t.HeaderPlan.Render("PLAN") + " " + t.Dim.Render("Terraform Viewer")
 	}
 
 	var status string
 	if m.prompt != "" {
-		status = warningStyle.Render(" ● WAITING FOR INPUT")
+		status = t.Warning.Render(" ● WAITING FOR INPUT")
 	} else if !m.done {
-		status = dimStyle.Render(" ● Live")
+		status = t.Dim.Render(" ● Live")
 	} else {
-		status = dimStyle.Render(" ● Done")
+		status = t.Dim.Render(" ● Done")
 	}
 
-	controls := dimStyle.Render(" ↑↓:navigate  q:quit  L:mode")
+	controls := t.Dim.Render(" ↑↓:navigate  q:quit  L:mode  m:toggle colors")
 	if m.ptyFile != nil {
 		if m.inputMode {
-			controls += dimStyle.Render("  Esc:exit input")
+			controls += t.Dim.Render("  Esc:exit input")
 		} else {
-			controls += dimStyle.Render("  i:enter input")
+			controls += t.Dim.Render("  i:enter input")
 		}
 	}
 
@@ -812,30 +888,31 @@ func (m Model) renderLine(idx int) string {
 // renderLogLine renders a log line with contextual styling
 func (m Model) renderLogLine(content string, isSelected bool) string {
 	var style lipgloss.Style
+	t := m.theme()
 
 	switch {
 	case strings.Contains(content, "Error:"):
-		style = errorStyle
+		style = t.Error
 	case strings.Contains(content, "Warning:"):
-		style = warningStyle
+		style = t.Warning
 	case strings.HasPrefix(content, "Initializing"):
-		style = importStyle
+		style = t.Import
 	case strings.Contains(content, "Success!"),
 		strings.Contains(content, "Creation complete"),
 		strings.Contains(content, "Complete!"):
-		style = createStyle
+		style = t.Create
 	case strings.Contains(content, "Enter a value:"):
-		style = forcesStyle
+		style = t.Forces
 	case strings.Contains(content, "Creating..."),
 		strings.Contains(content, "Destroying..."),
 		strings.Contains(content, "Modifying..."):
-		style = updateStyle
+		style = t.Update
 	default:
-		style = defaultStyle
+		style = t.Default
 	}
 
 	if isSelected {
-		return selectedStyle.Render("► " + content)
+		return t.Selected.Render("► " + content)
 	}
 	return "  " + style.Render(content)
 }
@@ -847,14 +924,15 @@ func (m Model) renderDiagnosticLine(diagIdx int, isSelected bool) string {
 	}
 
 	diag := m.diagnostics[diagIdx]
+	t := m.theme()
 	var style lipgloss.Style
 	var symbol string
 
 	if diag.Severity == "error" {
-		style = errorStyle
+		style = t.Error
 		symbol = "✗"
 	} else {
-		style = warningStyle
+		style = t.Warning
 		symbol = "⚠"
 	}
 
@@ -865,7 +943,7 @@ func (m Model) renderDiagnosticLine(diagIdx int, isSelected bool) string {
 
 	content := fmt.Sprintf("%s %s %s", expandIcon, symbol, diag.Summary)
 	if isSelected {
-		return selectedStyle.Render("► " + content)
+		return t.Selected.Render("► " + content)
 	}
 	return "  " + style.Render(content)
 }
@@ -877,15 +955,16 @@ func (m Model) renderDiagnosticDetailLine(diagIdx int, content string, isSelecte
 	}
 
 	diag := m.diagnostics[diagIdx]
+	t := m.theme()
 	var style lipgloss.Style
 	if diag.Severity == "error" {
-		style = errorStyle
+		style = t.Error
 	} else {
-		style = warningStyle
+		style = t.Warning
 	}
 
 	if isSelected {
-		return selectedStyle.Render("►   " + content)
+		return t.Selected.Render("►   " + content)
 	}
 	return "    " + style.Render(content)
 }
@@ -897,44 +976,79 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 	}
 
 	rc := m.resources[resIdx]
+	t := m.theme()
 	symbol := getSymbol(rc.Action)
-	style := getStyleForAction(rc.Action)
+	style := m.getStyleForAction(rc.Action)
 
 	expandIcon := "▸"
 	if rc.Expanded {
 		expandIcon = "▾"
 	}
 
-	if isSelected {
-		selBg := lipgloss.Color("#45475a")
-		arrowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")).Background(selBg).Bold(true)
-		// Create new styles with background - don't modify originals
-		prefixStyle := lipgloss.NewStyle().Foreground(style.GetForeground()).Background(selBg).Bold(true)
-		suffixStyle := lipgloss.NewStyle().Foreground(dimStyle.GetForeground()).Background(selBg)
+	// Format content based on mode
+	var content string
+	if m.renderingMode == RenderingModeHighContrast {
+		// High Contrast: Color the whole prefix (symbol + address)
+		content = style.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
+	} else {
+		// Dashboard: Color only the symbol
+		content = fmt.Sprintf("%s %s %s", expandIcon, style.Render(symbol), t.Default.Render(rc.Address))
+	}
 
-		prefix := prefixStyle.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
+	if isSelected {
+		selBg := t.Selected.GetBackground()
+		arrowStyle := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true)
+
+		// For selected state, we need to handle background carefully
+		var prefix string
+		if m.renderingMode == RenderingModeHighContrast {
+			prefix = lipgloss.NewStyle().Foreground(style.GetForeground()).Background(selBg).Bold(true).Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
+		} else {
+			// In dashboard mode selected, keep address default color (but on selected bg) and symbol colored
+			symStyled := lipgloss.NewStyle().Foreground(style.GetForeground()).Background(selBg).Bold(true).Render(symbol)
+			addrStyled := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true).Render(rc.Address)
+			prefix = fmt.Sprintf("%s %s %s", expandIcon, symStyled, addrStyled)
+		}
+
+		suffixStyle := lipgloss.NewStyle().Foreground(t.Dim.GetForeground()).Background(selBg)
 		suffix := suffixStyle.Render(rc.ActionText)
+
 		return fmt.Sprintf("%s%s %s", arrowStyle.Render("► "), prefix, suffix)
 	}
 
-	prefix := style.Render(fmt.Sprintf("%s %s %s", expandIcon, symbol, rc.Address))
-	suffix := dimStyle.Render(rc.ActionText)
-	return fmt.Sprintf("  %s %s", prefix, suffix)
+	var suffix string
+	if m.renderingMode == RenderingModeDashboard {
+		// Dashboard: Color the action text (e.g. "will be updated in-place")
+		suffix = style.Render(rc.ActionText)
+	} else {
+		// High Contrast: Dim the action text
+		suffix = t.Dim.Render(rc.ActionText)
+	}
+
+	return fmt.Sprintf("  %s %s", content, suffix)
 }
 
 // renderAttributeLine renders an attribute line with syntax highlighting
 func (m Model) renderAttributeLine(content string, isSelected bool) string {
 	if isSelected {
-		return selectedStyle.Render("►   " + content)
+		return m.theme().Selected.Render("►   " + content)
 	}
-	return "    " + styleAttribute(content)
+
+	if m.renderingMode == RenderingModeHighContrast {
+		return "    " + m.styleAttribute(content)
+	}
+
+	// Dashboard mode: minimal coloring
+	// Apply style only to the prefix/symbol
+	return "    " + m.styleAttributeMinimal(content)
 }
 
 // renderPrompt renders the pinned prompt with optional input cursor
 func (m Model) renderPrompt() string {
-	promptLine := promptStyle.Render(">> " + m.prompt)
+	t := m.theme()
+	promptLine := t.Prompt.Render(">> " + m.prompt)
 	if m.inputMode {
-		promptLine += " " + createStyle.Render(m.userInput) + dimStyle.Render("█")
+		promptLine += " " + t.Create.Render(m.userInput) + t.Dim.Render("█")
 	}
 	return promptLine
 }
@@ -942,44 +1056,106 @@ func (m Model) renderPrompt() string {
 // renderFooter renders the summary footer
 func (m Model) renderFooter() string {
 	if m.showLogs {
-		return dimStyle.Render(fmt.Sprintf("%d lines", len(m.lines)))
+		return m.theme().Dim.Render(fmt.Sprintf("%d lines", len(m.lines)))
 	}
-	return getSummary(m.resources, m.diagnostics)
+	return m.getSummary(m.resources, m.diagnostics)
 }
 
-// styleAttribute applies syntax highlighting to an attribute line
-func styleAttribute(attr string) string {
+// styleAttributeMinimal styles an attribute with minimal color (only symbols)
+func (m Model) styleAttributeMinimal(attr string) string {
+	t := m.theme()
+	trimmed := strings.TrimSpace(attr)
+
 	// Special handling for "# forces replacement"
 	if idx := strings.Index(attr, "# forces replacement"); idx != -1 {
 		before := attr[:idx]
 		forces := "# forces replacement"
 		after := attr[idx+len(forces):]
-		return styleAttributePrefix(before) + forcesStyle.Render(forces) + defaultStyle.Render(after)
+		return m.styleAttributeMinimal(before) + t.Forces.Render(forces) + t.Default.Render(after)
 	}
-	return styleAttributePrefix(attr)
-}
 
-// styleAttributePrefix styles an attribute based on its prefix (+/-/~/etc)
-func styleAttributePrefix(attr string) string {
-	trimmed := strings.TrimSpace(attr)
+	var symbol string
+	var style lipgloss.Style
 
 	switch {
 	case strings.HasPrefix(trimmed, "+"):
-		return addAttrStyle.Render(attr)
+		symbol = "+"
+		style = t.AddAttr
 	case strings.HasPrefix(trimmed, "-"):
-		return removeAttrStyle.Render(attr)
+		symbol = "-"
+		style = t.RemoveAttr
 	case strings.HasPrefix(trimmed, "~"):
-		return changeAttrStyle.Render(attr)
+		symbol = "~"
+		style = t.ChangeAttr
 	case strings.HasPrefix(trimmed, "#"):
-		return dimStyle.Render(attr)
+		return t.Dim.Render(attr)
 	default:
-		return dimStyle.Render(attr)
+		return t.Dim.Render(attr)
+	}
+
+	// Reconstruct the string with only symbol colored
+	// Find the symbol index in the original string to preserve whitespace
+	idx := strings.Index(attr, symbol)
+	if idx == -1 {
+		return attr // Fallback
+	}
+
+	prefix := attr[:idx]
+	rawSuffix := attr[idx+len(symbol):]
+
+	// Highlight arrows "->"
+	var suffix string
+	if strings.Contains(rawSuffix, "->") {
+		parts := strings.Split(rawSuffix, "->")
+		for i, part := range parts {
+			if i > 0 {
+				suffix += style.Render("->")
+			}
+			suffix += t.Default.Render(part)
+		}
+	} else {
+		suffix = t.Default.Render(rawSuffix)
+	}
+
+	return prefix + style.Render(symbol) + suffix
+}
+
+// styleAttribute applies syntax highlighting to an attribute line
+func (m Model) styleAttribute(attr string) string {
+	t := m.theme()
+	// Special handling for "# forces replacement"
+	if idx := strings.Index(attr, "# forces replacement"); idx != -1 {
+		before := attr[:idx]
+		forces := "# forces replacement"
+		after := attr[idx+len(forces):]
+		return m.styleAttributePrefix(before) + t.Forces.Render(forces) + t.Default.Render(after)
+	}
+	return m.styleAttributePrefix(attr)
+}
+
+// styleAttributePrefix styles an attribute based on its prefix (+/-/~/etc)
+func (m Model) styleAttributePrefix(attr string) string {
+	trimmed := strings.TrimSpace(attr)
+	t := m.theme()
+
+	switch {
+	case strings.HasPrefix(trimmed, "+"):
+		return t.AddAttr.Render(attr)
+	case strings.HasPrefix(trimmed, "-"):
+		return t.RemoveAttr.Render(attr)
+	case strings.HasPrefix(trimmed, "~"):
+		return t.ChangeAttr.Render(attr)
+	case strings.HasPrefix(trimmed, "#"):
+		return t.Dim.Render(attr)
+	default:
+		return t.Dim.Render(attr)
 	}
 }
 
 // getSummary generates the summary line showing change counts
-func getSummary(resources []ResourceChange, diagnostics []Diagnostic) string {
+func (m Model) getSummary(resources []ResourceChange, diagnostics []Diagnostic) string {
 	var parts []string
+	t := m.theme()
 
 	// Count diagnostics
 	var errorCount, warningCount int
@@ -992,10 +1168,10 @@ func getSummary(resources []ResourceChange, diagnostics []Diagnostic) string {
 	}
 
 	if errorCount > 0 {
-		parts = append(parts, errorStyle.Render(fmt.Sprintf("✗%d error", errorCount)))
+		parts = append(parts, t.Error.Render(fmt.Sprintf("✗%d error", errorCount)))
 	}
 	if warningCount > 0 {
-		parts = append(parts, warningStyle.Render(fmt.Sprintf("⚠%d warning", warningCount)))
+		parts = append(parts, t.Warning.Render(fmt.Sprintf("⚠%d warning", warningCount)))
 	}
 
 	// Count resource changes
@@ -1005,23 +1181,23 @@ func getSummary(resources []ResourceChange, diagnostics []Diagnostic) string {
 	}
 
 	if c := counts["create"]; c > 0 {
-		parts = append(parts, createStyle.Render(fmt.Sprintf("+%d create", c)))
+		parts = append(parts, t.Create.Render(fmt.Sprintf("+%d create", c)))
 	}
 	if c := counts["update"]; c > 0 {
-		parts = append(parts, updateStyle.Render(fmt.Sprintf("~%d update", c)))
+		parts = append(parts, t.Update.Render(fmt.Sprintf("~%d update", c)))
 	}
 	if c := counts["destroy"]; c > 0 {
-		parts = append(parts, destroyStyle.Render(fmt.Sprintf("-%d destroy", c)))
+		parts = append(parts, t.Destroy.Render(fmt.Sprintf("-%d destroy", c)))
 	}
 	if c := counts["replace"]; c > 0 {
-		parts = append(parts, replaceStyle.Render(fmt.Sprintf("±%d replace", c)))
+		parts = append(parts, t.Replace.Render(fmt.Sprintf("±%d replace", c)))
 	}
 	if c := counts["import"]; c > 0 {
-		parts = append(parts, importStyle.Render(fmt.Sprintf("←%d import", c)))
+		parts = append(parts, t.Import.Render(fmt.Sprintf("←%d import", c)))
 	}
 
 	if len(parts) == 0 {
-		return dimStyle.Render("No changes")
+		return t.Dim.Render("No changes")
 	}
 	return strings.Join(parts, "  ")
 }
@@ -1045,18 +1221,19 @@ func getSymbol(action string) string {
 }
 
 // getStyleForAction returns the style for a given action type
-func getStyleForAction(action string) lipgloss.Style {
+func (m Model) getStyleForAction(action string) lipgloss.Style {
+	t := m.theme()
 	switch action {
 	case "create":
-		return createStyle
+		return t.Create
 	case "update":
-		return updateStyle
+		return t.Update
 	case "destroy":
-		return destroyStyle
+		return t.Destroy
 	case "replace":
-		return replaceStyle
+		return t.Replace
 	case "import":
-		return importStyle
+		return t.Import
 	default:
 		return lipgloss.NewStyle()
 	}
@@ -1153,10 +1330,11 @@ func main() {
 
 	// Create model with buffered channel
 	m := Model{
-		showLogs:   true,
-		autoScroll: true,
-		ptyFile:    ptyFile,
-		streamChan: make(chan StreamMsg, streamBufferSize),
+		showLogs:      true,
+		autoScroll:    true,
+		renderingMode: RenderingModeDashboard,
+		ptyFile:       ptyFile,
+		streamChan:    make(chan StreamMsg, streamBufferSize),
 	}
 
 	// Handle signals for graceful shutdown
