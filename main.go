@@ -1007,10 +1007,21 @@ func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
 		
 		// Add "Error:" or "Warning:" prefix if it's the first line of summary
 		// We re-add it because parser stripped it, but we want to render it with style.
-		if diag.Severity == "error" {
-			prefix += t.BoldError.Render("Error: ")
-		} else if diag.Severity == "warning" {
-			prefix += t.BoldWarning.Render("Warning: ")
+		if m.renderingMode == RenderingModeHighContrast {
+			// In HighContrast, the background is colored, so we use plain text for the prefix
+			// to avoid Red-on-Red contrast issues (foreground will be dark on red bg).
+			if diag.Severity == "error" {
+				prefix += "Error: "
+			} else if diag.Severity == "warning" {
+				prefix += "Warning: "
+			}
+		} else {
+			// In Dashboard, we style the prefix text
+			if diag.Severity == "error" {
+				prefix += t.BoldError.Render("Error: ")
+			} else if diag.Severity == "warning" {
+				prefix += t.BoldWarning.Render("Warning: ")
+			}
 		}
 	} else {
 		prefix = "    " // 4 spaces to align with text
