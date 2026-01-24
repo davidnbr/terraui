@@ -65,6 +65,11 @@ type Theme struct {
 	Warning lipgloss.Style
 	Prompt  lipgloss.Style
 
+	// Rich formatting for diagnostics
+	BoldError   lipgloss.Style
+	BoldWarning lipgloss.Style
+	Underline   lipgloss.Style
+
 	AddAttr    lipgloss.Style
 	RemoveAttr lipgloss.Style
 	ChangeAttr lipgloss.Style
@@ -84,12 +89,18 @@ type ResourceChange struct {
 	Expanded   bool     // Whether details are expanded in UI
 }
 
+// DiagnosticLine represents a single line of detail in a diagnostic message
+type DiagnosticLine struct {
+	Content  string
+	IsMarker bool
+}
+
 // Diagnostic represents an error or warning from Terraform
 type Diagnostic struct {
-	Severity string   // "error" or "warning"
-	Summary  string   // Main message
-	Detail   []string // Additional detail lines
-	Expanded bool     // Whether details are expanded in UI
+	Severity string           // "error" or "warning"
+	Summary  string           // Main message
+	Detail   []DiagnosticLine // Additional detail lines
+	Expanded bool             // Whether details are expanded in UI
 }
 
 // Line represents a single display line in the UI
@@ -165,6 +176,10 @@ func getTheme(mode RenderingMode) Theme {
 			Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
 			Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
 
+			BoldError:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
+			BoldWarning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
+			Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
+
 			AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
 			RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
 			ChangeAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")),
@@ -188,11 +203,15 @@ func getTheme(mode RenderingMode) Theme {
 		Replace: lipgloss.NewStyle().Foreground(lipgloss.Color("#cba6f7")).Bold(true), // Mauve
 		Import:  lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true), // Sky
 
-		Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
-		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
-		Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
+		Error:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Bold(true),
+		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")).Bold(true),
+		Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#ff00ff")).Bold(true),
 
-		AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
+		BoldError:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")).Bold(true),
+		BoldWarning: lipgloss.NewStyle().Foreground(lipgloss.Color("#ffff00")).Bold(true),
+		Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff0000")),
+
+		AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")),
 		RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
 		ChangeAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")),
 		Forces:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
@@ -209,6 +228,8 @@ var (
 	errorPattern   = regexp.MustCompile(`Error:\s*(.+)`)
 	warningPattern = regexp.MustCompile(`Warning:\s*(.+)`)
 	promptPattern  = regexp.MustCompile(`Enter a value:\s*$`)
+	markerPattern  = regexp.MustCompile(`^\s*on\s+.+\s+line\s+\d+`)
+	underlinePattern = regexp.MustCompile(`^\s*[\^~]+`)
 	ansiPattern    = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 )
 
@@ -461,7 +482,7 @@ func (m *Model) rebuildLines() {
 		if diag.Expanded {
 			for j, detail := range diag.Detail {
 				// Wrap diagnostic details (accounting for 4 spaces padding in render)
-				wrapped := wrapText(detail, m.width-4, 0)
+				wrapped := wrapText(detail.Content, m.width-4, 0)
 				for _, w := range wrapped {
 					m.lines = append(m.lines, Line{
 						Type:        LineTypeDiagnosticDetail,
@@ -906,7 +927,7 @@ func (m Model) renderLine(idx int) string {
 	case LineTypeDiagnostic:
 		return m.renderDiagnosticLine(line, isSelected)
 	case LineTypeDiagnosticDetail:
-		return m.renderDiagnosticDetailLine(line.DiagIdx, line.Content, isSelected)
+		return m.renderDiagnosticDetailLine(line, isSelected)
 	case LineTypeResource:
 		return m.renderResourceLine(line.ResourceIdx, isSelected)
 	case LineTypeAttribute:
@@ -978,11 +999,19 @@ func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
 		summaryText = diag.Summary // Fallback
 	}
 
-	// If this is the first line (AttrIdx 0), show symbols
+	// If this is the first line (AttrIdx 0), show symbols and header text
 	// If continuation (AttrIdx > 0), show indentation
 	var prefix string
 	if line.AttrIdx <= 0 {
 		prefix = fmt.Sprintf("%s %s ", expandIcon, symbol)
+		
+		// Add "Error:" or "Warning:" prefix if it's the first line of summary
+		// We re-add it because parser stripped it, but we want to render it with style.
+		if diag.Severity == "error" {
+			prefix += t.BoldError.Render("Error: ")
+		} else if diag.Severity == "warning" {
+			prefix += t.BoldWarning.Render("Warning: ")
+		}
 	} else {
 		prefix = "    " // 4 spaces to align with text
 	}
@@ -995,24 +1024,64 @@ func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
 }
 
 // renderDiagnosticDetailLine renders a diagnostic detail line
-func (m Model) renderDiagnosticDetailLine(diagIdx int, content string, isSelected bool) string {
-	if diagIdx < 0 || diagIdx >= len(m.diagnostics) {
+func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
+	if line.DiagIdx < 0 || line.DiagIdx >= len(m.diagnostics) {
 		return ""
 	}
 
-	diag := m.diagnostics[diagIdx]
+	diag := m.diagnostics[line.DiagIdx]
+	// Retrieve original detail info if available (to check flags like IsMarker)
+	var detail DiagnosticLine
+	if line.AttrIdx >= 0 && line.AttrIdx < len(diag.Detail) {
+		detail = diag.Detail[line.AttrIdx]
+	}
+
 	t := m.theme()
-	var style lipgloss.Style
-	if diag.Severity == "error" {
-		style = t.Error
-	} else {
-		style = t.Warning
+	content := line.Content
+
+	// Apply styles based on content patterns
+	// Guide lines
+	if strings.HasPrefix(strings.TrimSpace(content), "│") || strings.HasPrefix(strings.TrimSpace(content), "├") || strings.HasPrefix(strings.TrimSpace(content), "╵") {
+		// If the line is JUST a guide or guide+whitespace, dim it.
+		// But often it's "│ code..."
+		// We want to dim the guide char "│".
+		// Simple replace?
+		content = strings.ReplaceAll(content, "│", t.Dim.Render("│"))
+		content = strings.ReplaceAll(content, "├", t.Dim.Render("├"))
+		content = strings.ReplaceAll(content, "─", t.Dim.Render("─"))
+		content = strings.ReplaceAll(content, "╵", t.Dim.Render("╵"))
+	}
+
+	// Underlines (^ or ~)
+	if underlinePattern.MatchString(content) {
+		// Color the whole line? Or just the markers?
+		// Terraform CLI colors the markers.
+		// Let's color the markers Red (Error) or Yellow (Warning).
+		// We use t.Underline style.
+		// We replace ^ and ~ with styled versions.
+		content = strings.ReplaceAll(content, "^", t.Underline.Render("^"))
+		content = strings.ReplaceAll(content, "~", t.Underline.Render("~"))
+	}
+
+	// File location markers ("on file.tf line X:")
+	// We captured IsMarker in parser.
+	// But rebuildLines might have wrapped it?
+	// If wrapped, line.AttrIdx refers to original index? No, rebuildLines iterates output lines.
+	// Wait, rebuildLines logic:
+	// for _, w := range wrapped { ... AttrIdx: j ... }
+	// So multiple lines can share AttrIdx.
+	// So `detail` is the ORIGINAL full line.
+	// `content` is the wrapped fragment.
+	// If `detail.IsMarker` is true, we should Bold this fragment.
+	if detail.IsMarker {
+		// Bold the whole line fragment?
+		content = lipgloss.NewStyle().Bold(true).Render(content)
 	}
 
 	if isSelected {
 		return t.Selected.Render("►   " + content)
 	}
-	return "    " + style.Render(content)
+	return "    " + content // Padding
 }
 
 // renderResourceLine renders a resource header line
@@ -1375,7 +1444,7 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 	}
 
 	var severity, summary string
-	var details []string
+	var details []DiagnosticLine
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -1388,7 +1457,7 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 				severity = "error"
 				summary = match[1]
 			} else {
-				details = append(details, trimmed)
+				details = append(details, DiagnosticLine{Content: trimmed, IsMarker: markerPattern.MatchString(trimmed)})
 			}
 			continue
 		}
@@ -1398,13 +1467,13 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 				severity = "warning"
 				summary = match[1]
 			} else {
-				details = append(details, trimmed)
+				details = append(details, DiagnosticLine{Content: trimmed, IsMarker: markerPattern.MatchString(trimmed)})
 			}
 			continue
 		}
 
 		if severity != "" && i > 0 {
-			details = append(details, trimmed)
+			details = append(details, DiagnosticLine{Content: trimmed, IsMarker: markerPattern.MatchString(trimmed)})
 		}
 	}
 
