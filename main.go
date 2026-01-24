@@ -446,12 +446,18 @@ func (m *Model) rebuildLines() {
 
 	// Plan view: diagnostics first, then resources
 	for i, diag := range m.diagnostics {
-		m.lines = append(m.lines, Line{
-			Type:        LineTypeDiagnostic,
-			DiagIdx:     i,
-			ResourceIdx: -1,
-			AttrIdx:     -1,
-		})
+		// Wrap summary (accounting for 4 chars prefix: "▸ ✗ ")
+		wrappedSummary := wrapText(diag.Summary, m.width-4, 0)
+		for wIdx, summaryLine := range wrappedSummary {
+			m.lines = append(m.lines, Line{
+				Type:        LineTypeDiagnostic,
+				DiagIdx:     i,
+				ResourceIdx: -1,
+				AttrIdx:     wIdx,
+				Content:     summaryLine,
+			})
+		}
+
 		if diag.Expanded {
 			for j, detail := range diag.Detail {
 				// Wrap diagnostic details (accounting for 4 spaces padding in render)
@@ -898,7 +904,7 @@ func (m Model) renderLine(idx int) string {
 	case LineTypeLog:
 		return m.renderLogLine(line.Content, isSelected)
 	case LineTypeDiagnostic:
-		return m.renderDiagnosticLine(line.DiagIdx, isSelected)
+		return m.renderDiagnosticLine(line, isSelected)
 	case LineTypeDiagnosticDetail:
 		return m.renderDiagnosticDetailLine(line.DiagIdx, line.Content, isSelected)
 	case LineTypeResource:
@@ -943,12 +949,12 @@ func (m Model) renderLogLine(content string, isSelected bool) string {
 }
 
 // renderDiagnosticLine renders a diagnostic header line
-func (m Model) renderDiagnosticLine(diagIdx int, isSelected bool) string {
-	if diagIdx < 0 || diagIdx >= len(m.diagnostics) {
+func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
+	if line.DiagIdx < 0 || line.DiagIdx >= len(m.diagnostics) {
 		return ""
 	}
 
-	diag := m.diagnostics[diagIdx]
+	diag := m.diagnostics[line.DiagIdx]
 	t := m.theme()
 	var style lipgloss.Style
 	var symbol string
@@ -966,7 +972,22 @@ func (m Model) renderDiagnosticLine(diagIdx int, isSelected bool) string {
 		expandIcon = "▾"
 	}
 
-	content := fmt.Sprintf("%s %s %s", expandIcon, symbol, diag.Summary)
+	// Use wrapped content if available
+	summaryText := line.Content
+	if summaryText == "" {
+		summaryText = diag.Summary // Fallback
+	}
+
+	// If this is the first line (AttrIdx 0), show symbols
+	// If continuation (AttrIdx > 0), show indentation
+	var prefix string
+	if line.AttrIdx <= 0 {
+		prefix = fmt.Sprintf("%s %s ", expandIcon, symbol)
+	} else {
+		prefix = "    " // 4 spaces to align with text
+	}
+
+	content := prefix + summaryText
 	if isSelected {
 		return t.Selected.Render("► " + content)
 	}
@@ -1395,6 +1416,7 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 		Severity: severity,
 		Summary:  summary,
 		Detail:   details,
+		Expanded: severity == "error",
 	}
 }
 
