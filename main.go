@@ -430,9 +430,9 @@ func (m *Model) rebuildLines() {
 	if m.showLogs {
 		for i, log := range m.logs {
 			// Wrap log lines
-			// Logs usually don't have hanging indent structure we can easily parse
-			// So we use 0 indent or maybe 2? Standard logs are flat.
-			wrapped := wrapText(log, m.width, 0)
+			// renderLogLine adds 2 spaces padding/cursor
+			// So we wrap at width - 2
+			wrapped := wrapText(log, m.width-2, 0)
 			for _, w := range wrapped {
 				m.lines = append(m.lines, Line{
 					Type:    LineTypeLog,

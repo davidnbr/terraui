@@ -180,6 +180,84 @@ func TestHighContrastPalette(t *testing.T) {
 	}
 }
 
+func TestLogWrapping(t *testing.T) {
+	m := &Model{
+		width:    10,
+		showLogs: true,
+		logs:     []string{"1234567890"}, // Length 10
+	}
+	
+m.rebuildLines()
+	
+	// renderLogLine adds 2 spaces padding.
+	// Effective width for text is 8.
+	// "1234567890" (10 chars).
+	// Should wrap: "12345678" (8 chars) + "90" (2 chars).
+	
+	if len(m.lines) != 2 {
+		t.Fatalf("expected 2 wrapped lines for logs, got %d", len(m.lines))
+	}
+	
+	if m.lines[0].Content != "12345678" {
+		t.Errorf("Line 1 content mismatch: %q", m.lines[0].Content)
+	}
+	if m.lines[1].Content != "90" {
+		t.Errorf("Line 2 content mismatch: %q", m.lines[1].Content)
+	}
+}
+
+func TestNestedIndentation(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	m := &Model{
+		renderingMode: RenderingModeDashboard,
+		streamChan: make(chan StreamMsg, 10),
+	}
+	input := `# test_resource will be created
+  + resource "test_resource" "this" {
+      + tags = {
+          + "Key" = "Value"
+        }
+    }
+`
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go m.readInputStream(ctx, strings.NewReader(input))
+
+	var resource *ResourceChange
+	for {
+		msg, ok := <-m.streamChan
+		if !ok || msg.Done {
+			break
+		}
+		if msg.Resource != nil {
+			resource = msg.Resource
+		}
+	}
+
+	if resource == nil {
+		t.Fatal("expected resource to be parsed")
+	}
+
+	// Verify rendered output of attributes
+	expectedIndents := []int{6, 10, 8} // spaces before symbols/content
+	for i, attr := range resource.Attributes {
+		rendered := m.renderAttributeLine(Line{Content: attr}, false)
+		// Count leading spaces
+		count := 0
+		for _, c := range rendered {
+			if c == ' ' {
+				count++
+			} else {
+				break
+			}
+		}
+		if count != expectedIndents[i] {
+			t.Errorf("expected %d leading spaces at index %d, got %d. Rendered: %q", expectedIndents[i], i, count, rendered)
+		}
+	}
+}
+
 func TestRebuildLinesWrapping(t *testing.T) {
 	m := &Model{
 		width: 20, // Small width to force wrapping
@@ -194,25 +272,19 @@ func TestRebuildLinesWrapping(t *testing.T) {
 		},
 	}
 	
-	m.rebuildLines()
+m.rebuildLines()
 	
 	// Expect resource header + attribute lines
 	// Header: 1 line
 	// Attribute: "    key = \"very long value that wraps\"" (32 chars)
 	// Width 20.
 	// Line 1: "    key = \"very lon" (20 chars)
-	// Line 2: "      g value that w" (Indent 6 + 14 chars = 20)
-	// Line 3: "      raps\"" (Indent 6 + 5 chars = 11)
+	// Line 2: "     value that wrap" (Indent 5 + 15 chars = 20)
+	// Line 3: "    s\"" (Indent 4 + 2 chars = 6)
 	
-	// Total 4 lines in m.lines
 	if len(m.lines) != 4 {
 		t.Fatalf("expected 4 lines (1 header + 3 wrapped), got %d", len(m.lines))
 	}
-	
-	// Check content of wrapped lines
-	// Note: styles/ANSI might affect string matching if I check Content directly?
-	// No, wrapText operates on raw string, and rebuildLines stores it in Content.
-	// renderAttributeLine adds styles LATER.
 	
 	if m.lines[1].Content != "    key = \"very long" {
 		t.Errorf("Line 1 content mismatch: %q", m.lines[1].Content)
