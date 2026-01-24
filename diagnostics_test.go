@@ -59,7 +59,7 @@ func TestLongDiagnosticMessage(t *testing.T) {
 }
 
 func TestDiagnosticSummaryWrapping(t *testing.T) {
-	lipgloss.SetColorProfile(termenv.Ascii)
+	lipgloss.SetColorProfile(termenv.ANSI)
 	m := &Model{
 		width: 20,
 		diagnostics: []Diagnostic{

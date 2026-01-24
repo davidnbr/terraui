@@ -9,10 +9,10 @@ import (
 )
 
 func TestRichFormattingRendering(t *testing.T) {
-	lipgloss.SetColorProfile(termenv.TrueColor)
+	// Use a predictable profile for assertion matching
+	lipgloss.SetColorProfile(termenv.ANSI)
 
-	m := &Model{
-		renderingMode: RenderingModeDashboard,
+	m := &Model{renderingMode: RenderingModeDashboard,
 		diagnostics: []Diagnostic{
 			{
 				Severity: "error",
@@ -77,5 +77,22 @@ func TestSanitizeBytes(t *testing.T) {
 	expected := ""
 	if got != expected {
 		t.Errorf("Expected empty string for reset code, got %x", got)
+	}
+}
+
+func TestANSISequencePreservation(t *testing.T) {
+	// \x1b[H is cursor to top-left (CSI, but not SGR)
+	input := "\x1b[HHello"
+	got := stripANSI(input)
+
+	if !strings.Contains(got, "\x1b[H") {
+		t.Errorf("Expected non-SGR sequence to be preserved, got %q", got)
+	}
+
+	// SGR should still be stripped
+	input = "\x1b[31mRed\x1b[0m"
+	got = stripANSI(input)
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("Expected SGR sequences to be stripped, got %q", got)
 	}
 }
