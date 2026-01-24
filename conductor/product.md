@@ -14,6 +14,7 @@
 
 # Core Features
 - **Interactive Plan Review:** Collapsible resource blocks with color-coded change types (create, update, destroy, replace, import) and attribute-level highlighting.
+- **Dual Rendering Modes:** Toggle between a standard "Dashboard" mode (minimal coloring, matching Terraform CLI) and a "High-Contrast" mode (full-line highlighting).
 - **Interactive Apply Mode:** A PTY-wrapped environment to stream logs in real-time and handle interactive "yes/no" confirmation prompts.
 - **Seamless Navigation:** Support for Vim-style keybindings, mouse interactions (scrolling, clicking), and quick toggling between Plan and Log views.
 
