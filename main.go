@@ -1079,9 +1079,9 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 		content = strings.Replace(content, trimmedMarker, styledMarker, 1)
 	}
 
-	// 3. Bold and UNDERLINE location markers ("on file.tf line X:")
+	// 3. Bold location markers ("on file.tf line X:")
 	if detail.IsMarker {
-		content = lipgloss.NewStyle().Bold(true).Underline(true).Render(content)
+		content = lipgloss.NewStyle().Bold(true).Render(content)
 	}
 
 	// 4. Apply mode-specific final wrapping
