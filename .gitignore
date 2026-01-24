@@ -39,4 +39,4 @@ terraform
 *.tfvars.local
 
 # Conductor
-conductor/
+conductor
