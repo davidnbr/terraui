@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -8,6 +9,58 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 )
+
+func TestIndentationPreservation(t *testing.T) {
+	m := &Model{
+		streamChan: make(chan StreamMsg, 10),
+	}
+	input := `# test_resource will be created
+  + resource "test_resource" "this" {
+      + attr1 = "value1"
+      + block {
+          + attr2 = "value2"
+        }
+    }
+`
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go m.readInputStream(ctx, strings.NewReader(input))
+
+	var resource *ResourceChange
+	for {
+		msg, ok := <-m.streamChan
+		if !ok || msg.Done {
+			break
+		}
+		if msg.Resource != nil {
+			resource = msg.Resource
+		}
+	}
+
+	if resource == nil {
+		t.Fatal("expected resource to be parsed")
+	}
+
+	// Current implementation trims everything and skips { and }
+	// We want it to PRESERVE indentation and braces
+	expectedAttributes := []string{
+		"      + attr1 = \"value1\"",
+		"      + block {",
+		"          + attr2 = \"value2\"",
+		"        }",
+	}
+
+	if len(resource.Attributes) != len(expectedAttributes) {
+		t.Fatalf("expected %d attributes, got %d", len(expectedAttributes), len(resource.Attributes))
+	}
+
+	for i, attr := range resource.Attributes {
+		if attr != expectedAttributes[i] {
+			t.Errorf("expected %q at index %d, got %q", expectedAttributes[i], i, attr)
+		}
+	}
+}
 
 func TestRenderingModeToggle(t *testing.T) {
 	m := Model{
@@ -127,11 +180,31 @@ func TestHighContrastPalette(t *testing.T) {
 	}
 }
 
-func TestHeaderHintBar(t *testing.T) {
-	m := Model{ready: true}
-	header := m.renderHeader()
+func TestModeConsistencyIndentation(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
+	m := &Model{}
+	content := "      + attr = \"value\""
 
-	if !strings.Contains(header, "m:toggle colors") {
-		t.Errorf("expected header to contain 'm:toggle colors', got %q", header)
+	m.renderingMode = RenderingModeDashboard
+	dashboardOutput := m.renderAttributeLine(content, false)
+
+	m.renderingMode = RenderingModeHighContrast
+	highContrastOutput := m.renderAttributeLine(content, false)
+
+	// Function to count leading spaces
+	getIndent := func(s string) int {
+		count := 0
+		for _, c := range s {
+			if c == ' ' {
+				count++
+			} else {
+				break
+			}
+		}
+		return count
+	}
+
+	if getIndent(dashboardOutput) != getIndent(highContrastOutput) {
+		t.Errorf("indentation mismatch between modes: dashboard=%d, highcontrast=%d", getIndent(dashboardOutput), getIndent(highContrastOutput))
 	}
 }

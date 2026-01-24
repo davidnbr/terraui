@@ -299,16 +299,11 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 			return
 		}
 		if inResource {
-			bracketDepth += strings.Count(line, "{")
-			bracketDepth -= strings.Count(line, "}")
-			if currentResource != nil && !strings.Contains(line, " resource \"") {
-				trimmed := strings.TrimSpace(line)
-				if trimmed != "" && trimmed != "{" && trimmed != "}" {
-					currentResource.Attributes = append(currentResource.Attributes, trimmed)
-				}
-			}
-			if bracketDepth == 0 && strings.Contains(line, "}") {
-				if currentResource != nil {
+			if currentResource != nil {
+				depthChange := strings.Count(line, "{") - strings.Count(line, "}")
+
+				// If we hit depth 0 and the line has a closing brace, it's the resource block end
+				if bracketDepth+depthChange == 0 && strings.Contains(line, "}") {
 					res := *currentResource
 					select {
 					case m.streamChan <- StreamMsg{Resource: &res}:
@@ -316,7 +311,17 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 						return
 					}
 					currentResource = nil
+					inResource = false
+					bracketDepth = 0
+				} else {
+					// It's an attribute line (including nested braces)
+					// We keep the original 'line' (without trimming) to preserve indentation
+					if strings.TrimSpace(line) != "" {
+						currentResource.Attributes = append(currentResource.Attributes, line)
+					}
+					bracketDepth += depthChange
 				}
+			} else {
 				inResource = false
 			}
 			return
@@ -1031,18 +1036,37 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 // renderAttributeLine renders an attribute line with syntax highlighting
 func (m Model) renderAttributeLine(content string, isSelected bool) string {
 	if isSelected {
-		return m.theme().Selected.Render("►   " + content)
+		t := m.theme()
+		selBg := t.Selected.GetBackground()
+		style := lipgloss.NewStyle().Background(selBg)
+
+		// For selected state, we want to maintain alignment while showing the cursor
+		// Find where the content starts (after leading whitespace)
+		trimmed := strings.TrimLeft(content, " ")
+		indent := content[:len(content)-len(trimmed)]
+
+		// We use the first two characters of indent for the cursor if possible
+		var cursor, rest string
+		if len(indent) >= 2 {
+			cursor = "► "
+			rest = indent[2:]
+		} else {
+			cursor = "►"
+			rest = indent
+		}
+
+		cursorStyle := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true)
+		return cursorStyle.Render(cursor) + style.Render(rest) + m.styleAttributeMinimal(trimmed)
 	}
 
 	if m.renderingMode == RenderingModeHighContrast {
-		return "    " + m.styleAttribute(content)
+		return m.styleAttribute(content)
 	}
 
 	// Dashboard mode: minimal coloring
 	// Apply style only to the prefix/symbol
-	return "    " + m.styleAttributeMinimal(content)
+	return m.styleAttributeMinimal(content)
 }
-
 // renderPrompt renders the pinned prompt with optional input cursor
 func (m Model) renderPrompt() string {
 	t := m.theme()
