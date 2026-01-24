@@ -1017,6 +1017,18 @@ func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
 	}
 
 	content := prefix + summaryText
+	if m.renderingMode == RenderingModeHighContrast {
+		// High Contrast: Bold text with background color for the summary
+		// Use severity color as background, dark text as foreground
+		hcStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(style.GetForeground())
+		if isSelected {
+			selBg := t.Selected.GetBackground()
+			arrowStyle := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true)
+			return arrowStyle.Render("► ") + hcStyle.Render(content)
+		}
+		return "  " + hcStyle.Render(content)
+	}
+
 	if isSelected {
 		return t.Selected.Render("► " + content)
 	}
@@ -1072,17 +1084,9 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 
 	// File location markers ("on file.tf line X:")
 	// We captured IsMarker in parser.
-	// But rebuildLines might have wrapped it?
-	// If wrapped, line.AttrIdx refers to original index? No, rebuildLines iterates output lines.
-	// Wait, rebuildLines logic:
-	// for _, w := range wrapped { ... AttrIdx: j ... }
-	// So multiple lines can share AttrIdx.
-	// So `detail` is the ORIGINAL full line.
-	// `content` is the wrapped fragment.
-	// If `detail.IsMarker` is true, we should Bold this fragment.
 	if detail.IsMarker {
-		// Bold the whole line fragment?
-		content = lipgloss.NewStyle().Bold(true).Render(content)
+		// Use Bold and Underline terminal attributes for location markers
+		content = lipgloss.NewStyle().Bold(true).Underline(true).Render(content)
 	}
 
 	if isSelected {
