@@ -186,18 +186,18 @@ func TestLogWrapping(t *testing.T) {
 		showLogs: true,
 		logs:     []string{"1234567890"}, // Length 10
 	}
-	
-m.rebuildLines()
-	
+
+	m.rebuildLines()
+
 	// renderLogLine adds 2 spaces padding.
 	// Effective width for text is 8.
 	// "1234567890" (10 chars).
 	// Should wrap: "12345678" (8 chars) + "90" (2 chars).
-	
+
 	if len(m.lines) != 2 {
 		t.Fatalf("expected 2 wrapped lines for logs, got %d", len(m.lines))
 	}
-	
+
 	if m.lines[0].Content != "12345678" {
 		t.Errorf("Line 1 content mismatch: %q", m.lines[0].Content)
 	}
@@ -210,7 +210,7 @@ func TestNestedIndentation(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.Ascii)
 	m := &Model{
 		renderingMode: RenderingModeDashboard,
-		streamChan: make(chan StreamMsg, 10),
+		streamChan:    make(chan StreamMsg, 10),
 	}
 	input := `# test_resource will be created
   + resource "test_resource" "this" {
@@ -271,9 +271,9 @@ func TestRebuildLinesWrapping(t *testing.T) {
 			},
 		},
 	}
-	
-m.rebuildLines()
-	
+
+	m.rebuildLines()
+
 	// Expect resource header + attribute lines
 	// Header: 1 line
 	// Attribute: "    key = \"very long value that wraps\"" (32 chars)
@@ -281,11 +281,11 @@ m.rebuildLines()
 	// Line 1: "    key = \"very lon" (20 chars)
 	// Line 2: "     value that wrap" (Indent 5 + 15 chars = 20)
 	// Line 3: "    s\"" (Indent 4 + 2 chars = 6)
-	
+
 	if len(m.lines) != 4 {
 		t.Fatalf("expected 4 lines (1 header + 3 wrapped), got %d", len(m.lines))
 	}
-	
+
 	if m.lines[1].Content != "    key = \"very long" {
 		t.Errorf("Line 1 content mismatch: %q", m.lines[1].Content)
 	}

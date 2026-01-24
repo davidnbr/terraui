@@ -483,7 +483,7 @@ func (m *Model) rebuildLines() {
 				// We calculate hanging indent based on the attribute's structure
 				indent := getIndentForLine(attr)
 				wrapped := wrapText(attr, m.width, indent)
-				
+
 				for _, w := range wrapped {
 					m.lines = append(m.lines, Line{
 						Type:        LineTypeAttribute,
@@ -1096,6 +1096,7 @@ func (m Model) renderAttributeLine(line Line, isSelected bool) string {
 	// Apply style only to the prefix/symbol
 	return m.styleAttributeMinimal(content, original)
 }
+
 // renderPrompt renders the pinned prompt with optional input cursor
 func (m Model) renderPrompt() string {
 	t := m.theme()
@@ -1118,7 +1119,7 @@ func (m Model) renderFooter() string {
 func (m Model) styleAttributeMinimal(attr string, original string) string {
 	t := m.theme()
 	trimmed := strings.TrimSpace(attr)
-	
+
 	// Special handling for "# forces replacement"
 	if idx := strings.Index(attr, "# forces replacement"); idx != -1 {
 		before := attr[:idx]
@@ -1130,7 +1131,7 @@ func (m Model) styleAttributeMinimal(attr string, original string) string {
 
 	var symbol string
 	var style lipgloss.Style
-	
+
 	switch {
 	case strings.HasPrefix(trimmed, "+"):
 		symbol = "+"
@@ -1162,7 +1163,7 @@ func (m Model) styleAttributeMinimal(attr string, original string) string {
 			// If I use t.RemoveAttr (Red), it matches the symbol.
 			return t.RemoveAttr.Render(attr)
 		}
-		
+
 		return t.Dim.Render(attr)
 	}
 
@@ -1172,10 +1173,10 @@ func (m Model) styleAttributeMinimal(attr string, original string) string {
 	if idx == -1 {
 		return attr // Fallback
 	}
-	
+
 	prefix := attr[:idx]
 	rawSuffix := attr[idx+len(symbol):]
-	
+
 	// Highlight arrows "->"
 	var suffix string
 	if strings.Contains(rawSuffix, "->") {
@@ -1189,9 +1190,10 @@ func (m Model) styleAttributeMinimal(attr string, original string) string {
 	} else {
 		suffix = t.Default.Render(rawSuffix)
 	}
-	
+
 	return prefix + style.Render(symbol) + suffix
 }
+
 // styleAttribute applies syntax highlighting to an attribute line
 func (m Model) styleAttribute(attr string, original string) string {
 	t := m.theme()
