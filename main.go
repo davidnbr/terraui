@@ -178,7 +178,7 @@ func getTheme(mode RenderingMode) Theme {
 
 			BoldError:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
 			BoldWarning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
-			Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
+			Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Underline(true),
 
 			AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
 			RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
