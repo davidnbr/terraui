@@ -123,6 +123,7 @@ type Model struct {
 
 	// UI state
 	cursor        int  // Current line index
+	width         int  // Terminal width
 	height        int  // Terminal height
 	offset        int  // Scroll offset
 	ready         bool // Whether initial size is known
@@ -447,13 +448,17 @@ func (m *Model) rebuildLines() {
 		})
 		if diag.Expanded {
 			for j, detail := range diag.Detail {
-				m.lines = append(m.lines, Line{
-					Type:        LineTypeDiagnosticDetail,
-					DiagIdx:     i,
-					ResourceIdx: -1,
-					AttrIdx:     j,
-					Content:     detail,
-				})
+				// Wrap diagnostic details (accounting for 4 spaces padding in render)
+				wrapped := wrapText(detail, m.width-4, 0)
+				for _, w := range wrapped {
+					m.lines = append(m.lines, Line{
+						Type:        LineTypeDiagnosticDetail,
+						DiagIdx:     i,
+						ResourceIdx: -1,
+						AttrIdx:     j,
+						Content:     w,
+					})
+				}
 			}
 		}
 	}
@@ -467,13 +472,21 @@ func (m *Model) rebuildLines() {
 		})
 		if rc.Expanded {
 			for j, attr := range rc.Attributes {
-				m.lines = append(m.lines, Line{
-					Type:        LineTypeAttribute,
-					ResourceIdx: i,
-					DiagIdx:     -1,
-					AttrIdx:     j,
-					Content:     attr,
-				})
+				// Wrap attributes
+				// Indentation is preserved in attr string, so we use full width
+				// We calculate hanging indent based on the attribute's structure
+				indent := getIndentForLine(attr)
+				wrapped := wrapText(attr, m.width, indent)
+				
+				for _, w := range wrapped {
+					m.lines = append(m.lines, Line{
+						Type:        LineTypeAttribute,
+						ResourceIdx: i,
+						DiagIdx:     -1,
+						AttrIdx:     j,
+						Content:     w,
+					})
+				}
 			}
 		}
 	}
@@ -568,6 +581,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.waitForStreamMsg()
 
 	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
 		m.needsSync = true
@@ -884,7 +898,7 @@ func (m Model) renderLine(idx int) string {
 	case LineTypeResource:
 		return m.renderResourceLine(line.ResourceIdx, isSelected)
 	case LineTypeAttribute:
-		return m.renderAttributeLine(line.Content, isSelected)
+		return m.renderAttributeLine(line, isSelected)
 	}
 
 	return ""
@@ -1034,7 +1048,8 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 }
 
 // renderAttributeLine renders an attribute line with syntax highlighting
-func (m Model) renderAttributeLine(content string, isSelected bool) string {
+func (m Model) renderAttributeLine(line Line, isSelected bool) string {
+	content := line.Content
 	if isSelected {
 		t := m.theme()
 		selBg := t.Selected.GetBackground()
