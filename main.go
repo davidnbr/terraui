@@ -1028,18 +1028,6 @@ func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
 	}
 
 	content := prefix + summaryText
-	if m.renderingMode == RenderingModeHighContrast {
-		// High Contrast: Bold text with background color for the summary
-		// Use severity color as background, dark text as foreground
-		hcStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(style.GetForeground())
-		if isSelected {
-			selBg := t.Selected.GetBackground()
-			arrowStyle := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true)
-			return arrowStyle.Render("► ") + hcStyle.Render(content)
-		}
-		return "  " + hcStyle.Render(content)
-	}
-
 	if isSelected {
 		return t.Selected.Render("► " + content)
 	}
@@ -1053,7 +1041,6 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	}
 
 	diag := m.diagnostics[line.DiagIdx]
-	// Retrieve original detail info if available (to check flags like IsMarker)
 	var detail DiagnosticLine
 	if line.AttrIdx >= 0 && line.AttrIdx < len(diag.Detail) {
 		detail = diag.Detail[line.AttrIdx]
@@ -1062,9 +1049,6 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	t := m.theme()
 	content := line.Content
 
-	// Apply styles based on content patterns
-	// Guide lines (│, ├, ─, ╵)
-	// Standard Terraform colors these with the diagnostic color (Red/Yellow)
 	var guideStyle lipgloss.Style
 	if diag.Severity == "error" {
 		guideStyle = t.Error
@@ -1072,49 +1056,36 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 		guideStyle = t.Warning
 	}
 
-	if strings.HasPrefix(strings.TrimSpace(content), "│") || strings.HasPrefix(strings.TrimSpace(content), "├") || strings.HasPrefix(strings.TrimSpace(content), "╵") {
+	// 1. Color structural guides (│, ├, ─, ╵)
+	if strings.ContainsAny(content, "│├─╵") {
 		content = strings.ReplaceAll(content, "│", guideStyle.Render("│"))
 		content = strings.ReplaceAll(content, "├", guideStyle.Render("├"))
 		content = strings.ReplaceAll(content, "─", guideStyle.Render("─"))
 		content = strings.ReplaceAll(content, "╵", guideStyle.Render("╵"))
-	} else if strings.Contains(content, "│") {
-		// Also handle inline guides if any (less common at start)
-		content = strings.ReplaceAll(content, "│", guideStyle.Render("│"))
 	}
 
-	// Underlines (^ or ~)
+	// 2. Color and UNDERLINE marker lines (^ or ~ markers)
 	if underlinePattern.MatchString(content) {
-		// Color the whole line? Or just the markers?
-		// Terraform CLI colors the markers.
-		// Let's color the markers Red (Error) or Yellow (Warning).
-		// We use t.Underline style.
-		// We replace ^ and ~ with styled versions.
+		// Use the dedicated Underline style (Red/Bold/Underlined)
 		content = strings.ReplaceAll(content, "^", t.Underline.Render("^"))
 		content = strings.ReplaceAll(content, "~", t.Underline.Render("~"))
 	}
 
-	// File location markers ("on file.tf line X:")
-	// We captured IsMarker in parser.
+	// 3. Bold and UNDERLINE location markers ("on file.tf line X:")
 	if detail.IsMarker {
-		// Use Bold and Underline terminal attributes for location markers
 		content = lipgloss.NewStyle().Bold(true).Underline(true).Render(content)
 	}
 
+	// 4. Apply mode-specific final wrapping
 	if m.renderingMode == RenderingModeHighContrast {
-		var baseStyle lipgloss.Style
-		if diag.Severity == "error" {
-			baseStyle = t.Error
-		} else {
-			baseStyle = t.Warning
-		}
-		// Wrap in base style for High Contrast mode, preserving existing ANSI
-		content = baseStyle.Render(content)
+		// In High Contrast, the entire line inherits the severity color
+		content = guideStyle.Render(content)
 	}
 
 	if isSelected {
 		return t.Selected.Render("►   " + content)
 	}
-	return "    " + content // Padding
+	return "    " + content
 }
 
 // renderResourceLine renders a resource header line
