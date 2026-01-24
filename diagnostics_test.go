@@ -44,21 +44,22 @@ func TestLongDiagnosticMessage(t *testing.T) {
 		t.Errorf("expected summary length 10000, got %d", len(diagnostic.Summary))
 	}
 
-		// Check details
-		foundLongDetail := false
-		for _, d := range diagnostic.Detail {
-			if len(d.Content) == 10000 {
-				foundLongDetail = true
-				break
-			}
-		}
-		
-		if !foundLongDetail {
-			t.Error("expected to find long detail line of length 10000")
+	// Check details
+	foundLongDetail := false
+	for _, d := range diagnostic.Detail {
+		if len(d.Content) == 10000 {
+			foundLongDetail = true
+			break
 		}
 	}
-	
-	func TestDiagnosticSummaryWrapping(t *testing.T) {	lipgloss.SetColorProfile(termenv.Ascii)
+
+	if !foundLongDetail {
+		t.Error("expected to find long detail line of length 10000")
+	}
+}
+
+func TestDiagnosticSummaryWrapping(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.Ascii)
 	m := &Model{
 		width: 20,
 		diagnostics: []Diagnostic{
@@ -119,7 +120,7 @@ func TestRealWorldDiagnosticParsing(t *testing.T) {
 	if !foundLorem {
 		t.Error("expected details to contain Lorem ipsum line")
 	}
-	
+
 	// Verify indentation preserved (roughly)
 	// Input: "│   on reproduce..." -> Content: "  on reproduce..."
 	foundOnLine := false

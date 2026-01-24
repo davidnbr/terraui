@@ -224,13 +224,13 @@ func getTheme(mode RenderingMode) Theme {
 
 // Pre-compiled regex patterns for parsing
 var (
-	headerPattern  = regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
-	errorPattern   = regexp.MustCompile(`Error:\s*(.+)`)
-	warningPattern = regexp.MustCompile(`Warning:\s*(.+)`)
-	promptPattern  = regexp.MustCompile(`Enter a value:\s*$`)
-	markerPattern  = regexp.MustCompile(`^\s*on\s+.+\s+line\s+\d+`)
+	headerPattern    = regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
+	errorPattern     = regexp.MustCompile(`Error:\s*(.+)`)
+	warningPattern   = regexp.MustCompile(`Warning:\s*(.+)`)
+	promptPattern    = regexp.MustCompile(`Enter a value:\s*$`)
+	markerPattern    = regexp.MustCompile(`^\s*on\s+.+\s+line\s+\d+`)
 	underlinePattern = regexp.MustCompile(`^\s*[\^~]+`)
-	ansiPattern    = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	ansiPattern      = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	ansiColorPattern = regexp.MustCompile(`\x1b\[(?:3[0-9]|4[0-9]|9[0-9]|10[0-9]|38;[0-9;]+|48;[0-9;]+)m`)
 	ansiResetPattern = regexp.MustCompile(`\x1b\[0m`)
 )
@@ -1007,7 +1007,7 @@ func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
 	var prefix string
 	if line.AttrIdx <= 0 {
 		prefix = fmt.Sprintf("%s %s ", expandIcon, symbol)
-		
+
 		// Add "Error:" or "Warning:" prefix if it's the first line of summary
 		// We re-add it because parser stripped it, but we want to render it with style.
 		if m.renderingMode == RenderingModeHighContrast {
@@ -1473,7 +1473,7 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 		// Clean text for regex matching and empty line detection
 		cleanLine := stripANSI(line)
 		trimmed := strings.TrimSpace(cleanLine)
-		
+
 		if trimmed == "" {
 			// Keep empty lines for spacing, but don't parse them as headers
 			if severity != "" {

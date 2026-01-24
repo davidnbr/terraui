@@ -10,7 +10,7 @@ import (
 
 func TestRichFormattingRendering(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
-	
+
 	m := &Model{
 		renderingMode: RenderingModeDashboard,
 		diagnostics: []Diagnostic{
@@ -26,7 +26,7 @@ func TestRichFormattingRendering(t *testing.T) {
 		},
 	}
 	m.rebuildLines()
-	
+
 	// Check Header (Error: ...)
 	// Line 0 is header.
 	header := m.renderDiagnosticLine(m.lines[0], false)
@@ -34,7 +34,7 @@ func TestRichFormattingRendering(t *testing.T) {
 	if !strings.Contains(header, "Error:") {
 		t.Error("Header should contain 'Error:'")
 	}
-	
+
 	// Check Marker (Bold)
 	// Line 1 is detail 0.
 	markerLine := m.renderDiagnosticDetailLine(m.lines[1], false)
@@ -43,7 +43,7 @@ func TestRichFormattingRendering(t *testing.T) {
 	if markerLine == "    "+m.lines[1].Content {
 		t.Error("Marker line should be styled (bold)")
 	}
-	
+
 	// Check Underline (^)
 	// Line 2 is detail 1.
 	underlineLine := m.renderDiagnosticDetailLine(m.lines[2], false)
@@ -61,7 +61,7 @@ func TestRichFormattingRendering(t *testing.T) {
 func TestANSIUnderlinePreservation(t *testing.T) {
 	input := "   3: provider \"aws\" \x1b[4m{\x1b[0m"
 	sanitized := sanitizeTerraformANSI(input)
-	
+
 	// Should contain [4m and NOT [0m
 	if !strings.Contains(sanitized, "\x1b[4m") {
 		t.Errorf("Expected preserved underline code [4m, got %q", sanitized)
