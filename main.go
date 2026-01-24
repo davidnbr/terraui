@@ -1040,16 +1040,23 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	content := line.Content
 
 	// Apply styles based on content patterns
-	// Guide lines
+	// Guide lines (│, ├, ─, ╵)
+	// Standard Terraform colors these with the diagnostic color (Red/Yellow)
+	var guideStyle lipgloss.Style
+	if diag.Severity == "error" {
+		guideStyle = t.Error
+	} else {
+		guideStyle = t.Warning
+	}
+
 	if strings.HasPrefix(strings.TrimSpace(content), "│") || strings.HasPrefix(strings.TrimSpace(content), "├") || strings.HasPrefix(strings.TrimSpace(content), "╵") {
-		// If the line is JUST a guide or guide+whitespace, dim it.
-		// But often it's "│ code..."
-		// We want to dim the guide char "│".
-		// Simple replace?
-		content = strings.ReplaceAll(content, "│", t.Dim.Render("│"))
-		content = strings.ReplaceAll(content, "├", t.Dim.Render("├"))
-		content = strings.ReplaceAll(content, "─", t.Dim.Render("─"))
-		content = strings.ReplaceAll(content, "╵", t.Dim.Render("╵"))
+		content = strings.ReplaceAll(content, "│", guideStyle.Render("│"))
+		content = strings.ReplaceAll(content, "├", guideStyle.Render("├"))
+		content = strings.ReplaceAll(content, "─", guideStyle.Render("─"))
+		content = strings.ReplaceAll(content, "╵", guideStyle.Render("╵"))
+	} else if strings.Contains(content, "│") {
+		// Also handle inline guides if any (less common at start)
+		content = strings.ReplaceAll(content, "│", guideStyle.Render("│"))
 	}
 
 	// Underlines (^ or ~)
@@ -1449,7 +1456,18 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
+			// Keep empty lines for spacing, but don't parse them as headers
+			if severity != "" {
+				details = append(details, DiagnosticLine{Content: ""})
+			}
 			continue
+		}
+
+		// Use the original line with preserved indentation for content
+		// We remove one leading space if present, as it's usually the space after '│'
+		content := line
+		if strings.HasPrefix(content, " ") {
+			content = content[1:]
 		}
 
 		if match := errorPattern.FindStringSubmatch(trimmed); match != nil {
@@ -1457,7 +1475,7 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 				severity = "error"
 				summary = match[1]
 			} else {
-				details = append(details, DiagnosticLine{Content: trimmed, IsMarker: markerPattern.MatchString(trimmed)})
+				details = append(details, DiagnosticLine{Content: content, IsMarker: markerPattern.MatchString(trimmed)})
 			}
 			continue
 		}
@@ -1467,13 +1485,13 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 				severity = "warning"
 				summary = match[1]
 			} else {
-				details = append(details, DiagnosticLine{Content: trimmed, IsMarker: markerPattern.MatchString(trimmed)})
+				details = append(details, DiagnosticLine{Content: content, IsMarker: markerPattern.MatchString(trimmed)})
 			}
 			continue
 		}
 
 		if severity != "" && i > 0 {
-			details = append(details, DiagnosticLine{Content: trimmed, IsMarker: markerPattern.MatchString(trimmed)})
+			details = append(details, DiagnosticLine{Content: content, IsMarker: markerPattern.MatchString(trimmed)})
 		}
 	}
 
