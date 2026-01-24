@@ -62,11 +62,20 @@ func TestANSIUnderlinePreservation(t *testing.T) {
 	input := "   3: provider \"aws\" \x1b[4m{\x1b[0m"
 	sanitized := sanitizeTerraformANSI(input)
 	
-	// Should contain [4m and [22;24m
+	// Should contain [4m and NOT [0m
 	if !strings.Contains(sanitized, "\x1b[4m") {
 		t.Errorf("Expected preserved underline code [4m, got %q", sanitized)
 	}
-	if !strings.Contains(sanitized, "\x1b[22;24m") {
-		t.Errorf("Expected converted reset code [22;24m, got %q", sanitized)
+	if strings.Contains(sanitized, "\x1b[0m") {
+		t.Errorf("Expected stripped reset code [0m, got %q", sanitized)
+	}
+}
+
+func TestSanitizeBytes(t *testing.T) {
+	input := "\x1b[0m"
+	got := sanitizeTerraformANSI(input)
+	expected := ""
+	if got != expected {
+		t.Errorf("Expected empty string for reset code, got %x", got)
 	}
 }

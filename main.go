@@ -1093,7 +1093,8 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	if isSelected {
 		return t.Selected.Render("►   " + content)
 	}
-	return "    " + content
+	// Add explicit reset for bold/underline to prevent leaking
+	return "    " + content + "\x1b[22;24m"
 }
 
 // renderResourceLine renders a resource header line
@@ -1449,14 +1450,12 @@ func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
-// sanitizeTerraformANSI preserves formatting (bold, underline) but removes colors.
-// It also converts Reset ([0m) to reset-formatting-only ([22;24m) to avoid
-// breaking our theme colors.
+// sanitizeTerraformANSI preserves formatting (bold, underline) but removes colors and resets.
 func sanitizeTerraformANSI(s string) string {
-	// 1. Convert Reset to Bold/Underline off only
-	s = ansiResetPattern.ReplaceAllString(s, "\x1b[22;24m")
-	// 2. Strip color codes
+	// 1. Strip color codes
 	s = ansiColorPattern.ReplaceAllString(s, "")
+	// 2. Strip reset codes ([0m). We rely on renderers to handle resets correctly.
+	s = ansiResetPattern.ReplaceAllString(s, "")
 	return s
 }
 
