@@ -180,31 +180,119 @@ func TestHighContrastPalette(t *testing.T) {
 	}
 }
 
-func TestModeConsistencyIndentation(t *testing.T) {
+func TestLogWrapping(t *testing.T) {
+	m := &Model{
+		width:    10,
+		showLogs: true,
+		logs:     []string{"1234567890"}, // Length 10
+	}
+
+	m.rebuildLines()
+
+	// renderLogLine adds 2 spaces padding.
+	// Effective width for text is 8.
+	// "1234567890" (10 chars).
+	// Should wrap: "12345678" (8 chars) + "90" (2 chars).
+
+	if len(m.lines) != 2 {
+		t.Fatalf("expected 2 wrapped lines for logs, got %d", len(m.lines))
+	}
+
+	if m.lines[0].Content != "12345678" {
+		t.Errorf("Line 1 content mismatch: %q", m.lines[0].Content)
+	}
+	if m.lines[1].Content != "90" {
+		t.Errorf("Line 2 content mismatch: %q", m.lines[1].Content)
+	}
+}
+
+func TestNestedIndentation(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.Ascii)
-	m := &Model{}
-	content := "      + attr = \"value\""
+	m := &Model{
+		renderingMode: RenderingModeDashboard,
+		streamChan:    make(chan StreamMsg, 10),
+	}
+	input := `# test_resource will be created
+  + resource "test_resource" "this" {
+      + tags = {
+          + "Key" = "Value"
+        }
+    }
+`
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	m.renderingMode = RenderingModeDashboard
-	dashboardOutput := m.renderAttributeLine(content, false)
+	go m.readInputStream(ctx, strings.NewReader(input))
 
-	m.renderingMode = RenderingModeHighContrast
-	highContrastOutput := m.renderAttributeLine(content, false)
+	var resource *ResourceChange
+	for {
+		msg, ok := <-m.streamChan
+		if !ok || msg.Done {
+			break
+		}
+		if msg.Resource != nil {
+			resource = msg.Resource
+		}
+	}
 
-	// Function to count leading spaces
-	getIndent := func(s string) int {
+	if resource == nil {
+		t.Fatal("expected resource to be parsed")
+	}
+
+	// Verify rendered output of attributes
+	expectedIndents := []int{6, 10, 8} // spaces before symbols/content
+	for i, attr := range resource.Attributes {
+		rendered := m.renderAttributeLine(Line{Content: attr}, false)
+		// Count leading spaces
 		count := 0
-		for _, c := range s {
+		for _, c := range rendered {
 			if c == ' ' {
 				count++
 			} else {
 				break
 			}
 		}
-		return count
+		if count != expectedIndents[i] {
+			t.Errorf("expected %d leading spaces at index %d, got %d. Rendered: %q", expectedIndents[i], i, count, rendered)
+		}
+	}
+}
+
+func TestRebuildLinesWrapping(t *testing.T) {
+	m := &Model{
+		width: 20, // Small width to force wrapping
+		resources: []ResourceChange{
+			{
+				Address: "r1",
+				Attributes: []string{
+					"    key = \"very long value that wraps\"",
+				},
+				Expanded: true,
+			},
+		},
 	}
 
-	if getIndent(dashboardOutput) != getIndent(highContrastOutput) {
-		t.Errorf("indentation mismatch between modes: dashboard=%d, highcontrast=%d", getIndent(dashboardOutput), getIndent(highContrastOutput))
+	m.rebuildLines()
+
+	// Expect resource header + attribute lines
+	// Header: 1 line
+	// Attribute: "    key = \"very long value that wraps\"" (32 chars)
+	// Width 20.
+	// Line 1: "    key = \"very lon" (20 chars)
+	// Line 2: "     value that wrap" (Indent 5 + 15 chars = 20)
+	// Line 3: "    s\"" (Indent 4 + 2 chars = 6)
+
+	if len(m.lines) != 4 {
+		t.Fatalf("expected 4 lines (1 header + 3 wrapped), got %d", len(m.lines))
+	}
+
+	if m.lines[1].Content != "    key = \"very long" {
+		t.Errorf("Line 1 content mismatch: %q", m.lines[1].Content)
+	}
+	if m.lines[2].Content != "     value that wrap" {
+		t.Errorf("Line 2 content mismatch: %q", m.lines[2].Content)
+	}
+	if m.lines[3].Content != "    s\"" {
+		t.Errorf("Line 3 content mismatch: %q", m.lines[3].Content)
 	}
 }

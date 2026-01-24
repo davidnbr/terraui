@@ -123,6 +123,7 @@ type Model struct {
 
 	// UI state
 	cursor        int  // Current line index
+	width         int  // Terminal width
 	height        int  // Terminal height
 	offset        int  // Scroll offset
 	ready         bool // Whether initial size is known
@@ -428,11 +429,17 @@ func (m *Model) rebuildLines() {
 
 	if m.showLogs {
 		for i, log := range m.logs {
-			m.lines = append(m.lines, Line{
-				Type:    LineTypeLog,
-				Content: log,
-				AttrIdx: i,
-			})
+			// Wrap log lines
+			// renderLogLine adds 2 spaces padding/cursor
+			// So we wrap at width - 2
+			wrapped := wrapText(log, m.width-2, 0)
+			for _, w := range wrapped {
+				m.lines = append(m.lines, Line{
+					Type:    LineTypeLog,
+					Content: w,
+					AttrIdx: i,
+				})
+			}
 		}
 		return
 	}
@@ -447,13 +454,17 @@ func (m *Model) rebuildLines() {
 		})
 		if diag.Expanded {
 			for j, detail := range diag.Detail {
-				m.lines = append(m.lines, Line{
-					Type:        LineTypeDiagnosticDetail,
-					DiagIdx:     i,
-					ResourceIdx: -1,
-					AttrIdx:     j,
-					Content:     detail,
-				})
+				// Wrap diagnostic details (accounting for 4 spaces padding in render)
+				wrapped := wrapText(detail, m.width-4, 0)
+				for _, w := range wrapped {
+					m.lines = append(m.lines, Line{
+						Type:        LineTypeDiagnosticDetail,
+						DiagIdx:     i,
+						ResourceIdx: -1,
+						AttrIdx:     j,
+						Content:     w,
+					})
+				}
 			}
 		}
 	}
@@ -467,13 +478,21 @@ func (m *Model) rebuildLines() {
 		})
 		if rc.Expanded {
 			for j, attr := range rc.Attributes {
-				m.lines = append(m.lines, Line{
-					Type:        LineTypeAttribute,
-					ResourceIdx: i,
-					DiagIdx:     -1,
-					AttrIdx:     j,
-					Content:     attr,
-				})
+				// Wrap attributes
+				// Indentation is preserved in attr string, so we use full width
+				// We calculate hanging indent based on the attribute's structure
+				indent := getIndentForLine(attr)
+				wrapped := wrapText(attr, m.width, indent)
+
+				for _, w := range wrapped {
+					m.lines = append(m.lines, Line{
+						Type:        LineTypeAttribute,
+						ResourceIdx: i,
+						DiagIdx:     -1,
+						AttrIdx:     j,
+						Content:     w,
+					})
+				}
 			}
 		}
 	}
@@ -568,6 +587,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.waitForStreamMsg()
 
 	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
 		m.needsSync = true
@@ -884,7 +904,7 @@ func (m Model) renderLine(idx int) string {
 	case LineTypeResource:
 		return m.renderResourceLine(line.ResourceIdx, isSelected)
 	case LineTypeAttribute:
-		return m.renderAttributeLine(line.Content, isSelected)
+		return m.renderAttributeLine(line, isSelected)
 	}
 
 	return ""
@@ -1034,7 +1054,16 @@ func (m Model) renderResourceLine(resIdx int, isSelected bool) string {
 }
 
 // renderAttributeLine renders an attribute line with syntax highlighting
-func (m Model) renderAttributeLine(content string, isSelected bool) string {
+func (m Model) renderAttributeLine(line Line, isSelected bool) string {
+	content := line.Content
+	// Retrieve original full attribute string for context (style determination of wrapped lines)
+	original := ""
+	if line.ResourceIdx >= 0 && line.ResourceIdx < len(m.resources) {
+		if line.AttrIdx >= 0 && line.AttrIdx < len(m.resources[line.ResourceIdx].Attributes) {
+			original = m.resources[line.ResourceIdx].Attributes[line.AttrIdx]
+		}
+	}
+
 	if isSelected {
 		t := m.theme()
 		selBg := t.Selected.GetBackground()
@@ -1056,17 +1085,18 @@ func (m Model) renderAttributeLine(content string, isSelected bool) string {
 		}
 
 		cursorStyle := lipgloss.NewStyle().Foreground(t.Default.GetForeground()).Background(selBg).Bold(true)
-		return cursorStyle.Render(cursor) + style.Render(rest) + m.styleAttributeMinimal(trimmed)
+		return cursorStyle.Render(cursor) + style.Render(rest) + m.styleAttributeMinimal(trimmed, original)
 	}
 
 	if m.renderingMode == RenderingModeHighContrast {
-		return m.styleAttribute(content)
+		return m.styleAttribute(content, original)
 	}
 
 	// Dashboard mode: minimal coloring
 	// Apply style only to the prefix/symbol
-	return m.styleAttributeMinimal(content)
+	return m.styleAttributeMinimal(content, original)
 }
+
 // renderPrompt renders the pinned prompt with optional input cursor
 func (m Model) renderPrompt() string {
 	t := m.theme()
@@ -1086,7 +1116,7 @@ func (m Model) renderFooter() string {
 }
 
 // styleAttributeMinimal styles an attribute with minimal color (only symbols)
-func (m Model) styleAttributeMinimal(attr string) string {
+func (m Model) styleAttributeMinimal(attr string, original string) string {
 	t := m.theme()
 	trimmed := strings.TrimSpace(attr)
 
@@ -1095,7 +1125,8 @@ func (m Model) styleAttributeMinimal(attr string) string {
 		before := attr[:idx]
 		forces := "# forces replacement"
 		after := attr[idx+len(forces):]
-		return m.styleAttributeMinimal(before) + t.Forces.Render(forces) + t.Default.Render(after)
+		// For the recursive call, we pass original because it's still part of the same line context
+		return m.styleAttributeMinimal(before, original) + t.Forces.Render(forces) + t.Default.Render(after)
 	}
 
 	var symbol string
@@ -1114,6 +1145,25 @@ func (m Model) styleAttributeMinimal(attr string) string {
 	case strings.HasPrefix(trimmed, "#"):
 		return t.Dim.Render(attr)
 	default:
+		// No prefix on this line (wrapped line?)
+		// Check original string to see if we are in a changed attribute
+		originalTrimmed := strings.TrimSpace(original)
+		if strings.HasPrefix(originalTrimmed, "+") || strings.HasPrefix(originalTrimmed, "~") {
+			// It's a wrapped part of an addition/update. Should be default color (White).
+			return t.Default.Render(attr)
+		}
+		if strings.HasPrefix(originalTrimmed, "-") {
+			// It's a wrapped part of a deletion.
+			// Terraform usually colors deletions entirely red? Or standard text red?
+			// In minimal mode, we might want Red text for deletions?
+			// User said "text should be white... for changes without changes use gray".
+			// For deletions, usually everything is red in standard CLI?
+			// Let's stick to user request: "On lines with changes the text should be white".
+			// Wait, for deletions (-), text usually IS the value being removed.
+			// If I use t.RemoveAttr (Red), it matches the symbol.
+			return t.RemoveAttr.Render(attr)
+		}
+
 		return t.Dim.Render(attr)
 	}
 
@@ -1145,20 +1195,20 @@ func (m Model) styleAttributeMinimal(attr string) string {
 }
 
 // styleAttribute applies syntax highlighting to an attribute line
-func (m Model) styleAttribute(attr string) string {
+func (m Model) styleAttribute(attr string, original string) string {
 	t := m.theme()
 	// Special handling for "# forces replacement"
 	if idx := strings.Index(attr, "# forces replacement"); idx != -1 {
 		before := attr[:idx]
 		forces := "# forces replacement"
 		after := attr[idx+len(forces):]
-		return m.styleAttributePrefix(before) + t.Forces.Render(forces) + t.Default.Render(after)
+		return m.styleAttributePrefix(before, original) + t.Forces.Render(forces) + t.Default.Render(after)
 	}
-	return m.styleAttributePrefix(attr)
+	return m.styleAttributePrefix(attr, original)
 }
 
 // styleAttributePrefix styles an attribute based on its prefix (+/-/~/etc)
-func (m Model) styleAttributePrefix(attr string) string {
+func (m Model) styleAttributePrefix(attr string, original string) string {
 	trimmed := strings.TrimSpace(attr)
 	t := m.theme()
 
@@ -1172,7 +1222,18 @@ func (m Model) styleAttributePrefix(attr string) string {
 	case strings.HasPrefix(trimmed, "#"):
 		return t.Dim.Render(attr)
 	default:
-		return t.Dim.Render(attr)
+		// Fallback to original context
+		originalTrimmed := strings.TrimSpace(original)
+		switch {
+		case strings.HasPrefix(originalTrimmed, "+"):
+			return t.AddAttr.Render(attr)
+		case strings.HasPrefix(originalTrimmed, "-"):
+			return t.RemoveAttr.Render(attr)
+		case strings.HasPrefix(originalTrimmed, "~"):
+			return t.ChangeAttr.Render(attr)
+		default:
+			return t.Dim.Render(attr)
+		}
 	}
 }
 
