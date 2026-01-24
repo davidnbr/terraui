@@ -1060,13 +1060,14 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 		guideStyle = t.Warning
 	}
 
-	// 1. Color structural guides (│, ├, ─, ╵)
-	if strings.ContainsAny(cleanContent, "│├─╵") {
-		content = strings.ReplaceAll(content, "│", guideStyle.Render("│"))
-		content = strings.ReplaceAll(content, "├", guideStyle.Render("├"))
-		content = strings.ReplaceAll(content, "─", guideStyle.Render("─"))
-		content = strings.ReplaceAll(content, "╵", guideStyle.Render("╵"))
-	}
+	// 1. Color structural guides (│, ├, ─, ╵) using an efficient Replacer
+	guideReplacer := strings.NewReplacer(
+		"│", guideStyle.Render("│"),
+		"├", guideStyle.Render("├"),
+		"─", guideStyle.Render("─"),
+		"╵", guideStyle.Render("╵"),
+	)
+	content = guideReplacer.Replace(content)
 
 	// 2. Color and UNDERLINE marker lines (^ or ~ markers)
 	if underlinePattern.MatchString(cleanContent) {
@@ -1086,8 +1087,8 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	// 4. Apply mode-specific final wrapping
 	if m.renderingMode == RenderingModeHighContrast {
 		// In High Contrast, the entire line inherits the severity color
-		// Wrap in base style, preserving existing ANSI formatting (bold/underline)
-		content = guideStyle.Render(content)
+		// We use a style that only sets the foreground to avoid overwriting internal bold/underline
+		content = lipgloss.NewStyle().Foreground(guideStyle.GetForeground()).Render(content)
 	}
 
 	if isSelected {
