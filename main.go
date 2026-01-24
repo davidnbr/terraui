@@ -178,7 +178,7 @@ func getTheme(mode RenderingMode) Theme {
 
 			BoldError:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
 			BoldWarning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
-			Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Underline(true),
+			Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Underline(true).Bold(true),
 
 			AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
 			RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
@@ -1087,6 +1087,17 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	if detail.IsMarker {
 		// Use Bold and Underline terminal attributes for location markers
 		content = lipgloss.NewStyle().Bold(true).Underline(true).Render(content)
+	}
+
+	if m.renderingMode == RenderingModeHighContrast {
+		var baseStyle lipgloss.Style
+		if diag.Severity == "error" {
+			baseStyle = t.Error
+		} else {
+			baseStyle = t.Warning
+		}
+		// Wrap in base style for High Contrast mode, preserving existing ANSI
+		content = baseStyle.Render(content)
 	}
 
 	if isSelected {
