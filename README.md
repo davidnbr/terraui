@@ -35,13 +35,12 @@ Terraform Apply
 Terraform Plan
 ![Terraform Plan Normal Mode](https://github.com/user-attachments/assets/ed5d24fe-6847-4d0e-8e6c-b9466d77fb21)
 
-### Terraform Apply
+### High Contrast Mode
 
-![Terraui Apply Demo](https://github.com/user-attachments/assets/7a867f0c-6d93-4d8a-b377-ad624182b89c)
-
-### Terraform Plan
-
-![Terraui Plan Demo](https://github.com/user-attachments/assets/045a349d-dbce-4892-95b2-9e8d132fc974)
+Terraform Apply
+![Terraui Apply High Contrast Mode](https://github.com/user-attachments/assets/1ee151bc-a7cb-454b-b0fc-c1a6a74351c9)
+Terraform Plan
+![Terraui Plan High Contrast Mode](https://github.com/user-attachments/assets/f01ef86c-ab11-476e-be20-ea3eb900b30c)
 
 ## Installation
 
