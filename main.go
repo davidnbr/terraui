@@ -65,6 +65,9 @@ type Theme struct {
 	Warning lipgloss.Style
 	Prompt  lipgloss.Style
 
+	// Rich formatting for diagnostic markers (^ and ~ underlines)
+	Underline lipgloss.Style
+
 	AddAttr    lipgloss.Style
 	RemoveAttr lipgloss.Style
 	ChangeAttr lipgloss.Style
@@ -73,6 +76,10 @@ type Theme struct {
 	Dim      lipgloss.Style
 	Default  lipgloss.Style
 	Selected lipgloss.Style
+
+	// Optimized replacers
+	ErrorReplacer   *strings.Replacer
+	WarningReplacer *strings.Replacer
 }
 
 // ResourceChange represents a single resource change from terraform plan
@@ -84,12 +91,18 @@ type ResourceChange struct {
 	Expanded   bool     // Whether details are expanded in UI
 }
 
+// DiagnosticLine represents a single line of detail in a diagnostic message
+type DiagnosticLine struct {
+	Content  string
+	IsMarker bool
+}
+
 // Diagnostic represents an error or warning from Terraform
 type Diagnostic struct {
-	Severity string   // "error" or "warning"
-	Summary  string   // Main message
-	Detail   []string // Additional detail lines
-	Expanded bool     // Whether details are expanded in UI
+	Severity string           // "error" or "warning"
+	Summary  string           // Main message
+	Detail   []DiagnosticLine // Additional detail lines
+	Expanded bool             // Whether details are expanded in UI
 }
 
 // Line represents a single display line in the UI
@@ -142,15 +155,31 @@ type Model struct {
 	// Concurrency
 	streamChan chan StreamMsg     // Channel for receiving parsed content
 	cancelFunc context.CancelFunc // For signaling goroutine shutdown
+
+	// Cached theme to avoid repeated allocations during rendering
+	cachedTheme *Theme
 }
 
 func (m *Model) theme() Theme {
-	return getTheme(m.renderingMode)
+	if m.cachedTheme == nil {
+		t := getTheme(m.renderingMode)
+		m.cachedTheme = &t
+	}
+	return *m.cachedTheme
+}
+
+func createGuideReplacer(style lipgloss.Style) *strings.Replacer {
+	return strings.NewReplacer(
+		"│", style.Render("│"),
+		"├", style.Render("├"),
+		"─", style.Render("─"),
+		"╵", style.Render("╵"),
+	)
 }
 
 func getTheme(mode RenderingMode) Theme {
 	if mode == RenderingModeHighContrast {
-		return Theme{
+		t := Theme{
 			HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1),
 			HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1),
 			InputMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1),
@@ -165,6 +194,8 @@ func getTheme(mode RenderingMode) Theme {
 			Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
 			Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
 
+			Underline: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Underline(true).Bold(true),
+
 			AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
 			RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
 			ChangeAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")),
@@ -174,10 +205,13 @@ func getTheme(mode RenderingMode) Theme {
 			Default:  lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")),
 			Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cdd6f4")).Background(lipgloss.Color("#45475a")),
 		}
+		t.ErrorReplacer = createGuideReplacer(t.Error)
+		t.WarningReplacer = createGuideReplacer(t.Warning)
+		return t
 	}
 
 	// Dashboard mode (mimics standard Terraform colors but with Catppuccin palette)
-	return Theme{
+	t := Theme{
 		HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1),
 		HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1),
 		InputMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1),
@@ -192,6 +226,8 @@ func getTheme(mode RenderingMode) Theme {
 		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
 		Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
 
+		Underline: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Underline(true).Bold(true),
+
 		AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
 		RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
 		ChangeAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")),
@@ -201,15 +237,22 @@ func getTheme(mode RenderingMode) Theme {
 		Default:  lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")),
 		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#cdd6f4")).Background(lipgloss.Color("#45475a")),
 	}
+	t.ErrorReplacer = createGuideReplacer(t.Error)
+	t.WarningReplacer = createGuideReplacer(t.Warning)
+	return t
 }
 
 // Pre-compiled regex patterns for parsing
 var (
-	headerPattern  = regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
-	errorPattern   = regexp.MustCompile(`Error:\s*(.+)`)
-	warningPattern = regexp.MustCompile(`Warning:\s*(.+)`)
-	promptPattern  = regexp.MustCompile(`Enter a value:\s*$`)
-	ansiPattern    = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	headerPattern    = regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
+	errorPattern     = regexp.MustCompile(`Error:\s*(.+)`)
+	warningPattern   = regexp.MustCompile(`Warning:\s*(.+)`)
+	promptPattern    = regexp.MustCompile(`Enter a value:\s*$`)
+	markerPattern    = regexp.MustCompile(`^\s*on\s+.+\s+line\s+\d+`)
+	underlinePattern = regexp.MustCompile(`^\s*[\^~]+`)
+	ansiPattern      = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	ansiColorPattern = regexp.MustCompile(`\x1b\[(?:3[0-9]|4[0-9]|9[0-9]|10[0-9]|38;[0-9;]+|48;[0-9;]+)m`)
+	ansiResetPattern = regexp.MustCompile(`\x1b\[0m`)
 )
 
 // Init implements tea.Model. Starts input reading and periodic ticks.
@@ -244,15 +287,16 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 	bracketDepth := 0
 
 	processLine := func(rawLine string) {
-		line := stripANSI(rawLine)
+		cleanLine := stripANSI(rawLine)
+		richLine := sanitizeTerraformANSI(rawLine)
 
 		// Diagnostic block handling
-		if strings.HasPrefix(line, "╷") {
+		if strings.HasPrefix(cleanLine, "╷") {
 			inDiagnostic = true
 			diagLines = make([]string, 0)
 			return
 		}
-		if strings.HasPrefix(line, "╵") {
+		if strings.HasPrefix(cleanLine, "╵") {
 			if inDiagnostic && len(diagLines) > 0 {
 				diag := parseDiagnosticBlock(diagLines)
 				if diag != nil {
@@ -268,13 +312,13 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 			return
 		}
 		if inDiagnostic {
-			content := strings.TrimPrefix(line, "│")
-			diagLines = append(diagLines, content)
+			richLineContent := strings.TrimPrefix(richLine, "│")
+			diagLines = append(diagLines, richLineContent)
 			return
 		}
 
 		// Resource header detection
-		if match := headerPattern.FindStringSubmatch(line); match != nil {
+		if match := headerPattern.FindStringSubmatch(cleanLine); match != nil {
 			if currentResource != nil {
 				res := *currentResource
 				select {
@@ -294,17 +338,17 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 		}
 
 		// Resource body parsing
-		if currentResource != nil && strings.Contains(line, " resource \"") {
+		if currentResource != nil && strings.Contains(cleanLine, " resource \"") {
 			inResource = true
-			bracketDepth = strings.Count(line, "{") - strings.Count(line, "}")
+			bracketDepth = strings.Count(cleanLine, "{") - strings.Count(cleanLine, "}")
 			return
 		}
 		if inResource {
 			if currentResource != nil {
-				depthChange := strings.Count(line, "{") - strings.Count(line, "}")
+				depthChange := strings.Count(cleanLine, "{") - strings.Count(cleanLine, "}")
 
 				// If we hit depth 0 and the line has a closing brace, it's the resource block end
-				if bracketDepth+depthChange == 0 && strings.Contains(line, "}") {
+				if bracketDepth+depthChange == 0 && strings.Contains(cleanLine, "}") {
 					res := *currentResource
 					select {
 					case m.streamChan <- StreamMsg{Resource: &res}:
@@ -316,9 +360,9 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 					bracketDepth = 0
 				} else {
 					// It's an attribute line (including nested braces)
-					// We keep the original 'line' (without trimming) to preserve indentation
-					if strings.TrimSpace(line) != "" {
-						currentResource.Attributes = append(currentResource.Attributes, line)
+					// We keep the original 'cleanLine' (without trimming) to preserve indentation
+					if strings.TrimSpace(cleanLine) != "" {
+						currentResource.Attributes = append(currentResource.Attributes, cleanLine)
 					}
 					bracketDepth += depthChange
 				}
@@ -329,8 +373,8 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 		}
 
 		// Generic log line
-		if strings.TrimSpace(line) != "" {
-			l := line
+		if strings.TrimSpace(cleanLine) != "" {
+			l := cleanLine
 			select {
 			case m.streamChan <- StreamMsg{LogLine: &l}:
 			case <-ctx.Done():
@@ -461,7 +505,7 @@ func (m *Model) rebuildLines() {
 		if diag.Expanded {
 			for j, detail := range diag.Detail {
 				// Wrap diagnostic details (accounting for 4 spaces padding in render)
-				wrapped := wrapText(detail, m.width-4, 0)
+				wrapped := wrapText(detail.Content, m.width-4, 0)
 				for _, w := range wrapped {
 					m.lines = append(m.lines, Line{
 						Type:        LineTypeDiagnosticDetail,
@@ -550,6 +594,7 @@ func (m *Model) toggleRenderingMode() {
 	} else {
 		m.renderingMode = RenderingModeDashboard
 	}
+	m.cachedTheme = nil // Invalidate cache so theme() regenerates it
 }
 
 // Update implements tea.Model. Handles all messages and user input.
@@ -906,7 +951,7 @@ func (m Model) renderLine(idx int) string {
 	case LineTypeDiagnostic:
 		return m.renderDiagnosticLine(line, isSelected)
 	case LineTypeDiagnosticDetail:
-		return m.renderDiagnosticDetailLine(line.DiagIdx, line.Content, isSelected)
+		return m.renderDiagnosticDetailLine(line, isSelected)
 	case LineTypeResource:
 		return m.renderResourceLine(line.ResourceIdx, isSelected)
 	case LineTypeAttribute:
@@ -978,11 +1023,30 @@ func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
 		summaryText = diag.Summary // Fallback
 	}
 
-	// If this is the first line (AttrIdx 0), show symbols
+	// If this is the first line (AttrIdx 0), show symbols and header text
 	// If continuation (AttrIdx > 0), show indentation
 	var prefix string
 	if line.AttrIdx <= 0 {
 		prefix = fmt.Sprintf("%s %s ", expandIcon, symbol)
+
+		// Add "Error:" or "Warning:" prefix if it's the first line of summary
+		// We re-add it because parser stripped it, but we want to render it with style.
+		if m.renderingMode == RenderingModeHighContrast {
+			// In HighContrast, the background is colored, so we use plain text for the prefix
+			// to avoid Red-on-Red contrast issues (foreground will be dark on red bg).
+			if diag.Severity == "error" {
+				prefix += "Error: "
+			} else if diag.Severity == "warning" {
+				prefix += "Warning: "
+			}
+		} else {
+			// In Dashboard, we style the prefix text
+			if diag.Severity == "error" {
+				prefix += t.Error.Render("Error: ")
+			} else if diag.Severity == "warning" {
+				prefix += t.Warning.Render("Warning: ")
+			}
+		}
 	} else {
 		prefix = "    " // 4 spaces to align with text
 	}
@@ -995,24 +1059,64 @@ func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
 }
 
 // renderDiagnosticDetailLine renders a diagnostic detail line
-func (m Model) renderDiagnosticDetailLine(diagIdx int, content string, isSelected bool) string {
-	if diagIdx < 0 || diagIdx >= len(m.diagnostics) {
+func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
+	if line.DiagIdx < 0 || line.DiagIdx >= len(m.diagnostics) {
 		return ""
 	}
 
-	diag := m.diagnostics[diagIdx]
+	diag := m.diagnostics[line.DiagIdx]
+	var detail DiagnosticLine
+	if line.AttrIdx >= 0 && line.AttrIdx < len(diag.Detail) {
+		detail = diag.Detail[line.AttrIdx]
+	}
+
 	t := m.theme()
-	var style lipgloss.Style
+	richLine := line.Content
+	cleanLine := stripANSI(richLine)
+
+	var guideStyle lipgloss.Style
+	var replacer *strings.Replacer
 	if diag.Severity == "error" {
-		style = t.Error
+		guideStyle = t.Error
+		replacer = t.ErrorReplacer
 	} else {
-		style = t.Warning
+		guideStyle = t.Warning
+		replacer = t.WarningReplacer
+	}
+
+	// 1. Color structural guides (│, ├, ─, ╵) using an efficient Replacer
+	richLine = replacer.Replace(richLine)
+
+	// 2. Color and UNDERLINE marker lines (^ or ~ markers)
+	if underlinePattern.MatchString(cleanLine) {
+		// Use the dedicated Underline style (Red/Bold/Underlined)
+		// We style the markers while preserving indentation
+		trimmedMarker := strings.TrimSpace(cleanLine)
+		styledMarker := t.Underline.Render(trimmedMarker)
+		// Re-apply to the rich content string
+		richLine = strings.Replace(richLine, trimmedMarker, styledMarker, 1)
+	}
+
+	// 3. Bold location markers ("on file.tf line X:")
+	if detail.IsMarker {
+		richLine = lipgloss.NewStyle().Bold(true).Render(richLine)
+	}
+
+	// 4. Apply mode-specific final wrapping
+	if m.renderingMode == RenderingModeHighContrast {
+		// In High Contrast, the entire line inherits the severity color
+		// We use a style that only sets the foreground to avoid overwriting internal bold/underline
+		richLine = lipgloss.NewStyle().Foreground(guideStyle.GetForeground()).Render(richLine)
 	}
 
 	if isSelected {
-		return t.Selected.Render("►   " + content)
+		return t.Selected.Render("►   " + richLine)
 	}
-	return "    " + style.Render(content)
+	// \x1b[22;24m resets bold (22) and underline (24) without a full reset ([0m).
+	// This prevents formatting from leaking to subsequent lines while preserving
+	// any color state that lipgloss may have set. We can't use lipgloss for this
+	// because it doesn't provide a "reset formatting only" style.
+	return "    " + richLine + "\x1b[22;24m"
 }
 
 // renderResourceLine renders a resource header line
@@ -1368,19 +1472,42 @@ func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
+// sanitizeTerraformANSI preserves formatting (bold, underline) but removes colors and resets.
+func sanitizeTerraformANSI(s string) string {
+	// 1. Strip color codes
+	s = ansiColorPattern.ReplaceAllString(s, "")
+	// 2. Strip reset codes ([0m). We rely on renderers to handle resets correctly.
+	s = ansiResetPattern.ReplaceAllString(s, "")
+	return s
+}
+
 // parseDiagnosticBlock parses a diagnostic block into a Diagnostic struct
-func parseDiagnosticBlock(lines []string) *Diagnostic {
-	if len(lines) == 0 {
+func parseDiagnosticBlock(richLines []string) *Diagnostic {
+	if len(richLines) == 0 {
 		return nil
 	}
 
 	var severity, summary string
-	var details []string
+	var details []DiagnosticLine
 
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
+	for i, richLine := range richLines {
+		// Clean text for regex matching and empty line detection
+		cleanLine := stripANSI(richLine)
+		trimmed := strings.TrimSpace(cleanLine)
+
 		if trimmed == "" {
+			// Keep empty lines for spacing, but don't parse them as headers
+			if severity != "" {
+				details = append(details, DiagnosticLine{Content: ""})
+			}
 			continue
+		}
+
+		// Use the line with preserved indentation and rich formatting (bold/underline)
+		// We remove one leading space if present, as it's usually the space after '│'
+		richLineContent := richLine
+		if strings.HasPrefix(richLineContent, " ") {
+			richLineContent = richLineContent[1:]
 		}
 
 		if match := errorPattern.FindStringSubmatch(trimmed); match != nil {
@@ -1388,7 +1515,7 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 				severity = "error"
 				summary = match[1]
 			} else {
-				details = append(details, trimmed)
+				details = append(details, DiagnosticLine{Content: richLineContent, IsMarker: markerPattern.MatchString(trimmed)})
 			}
 			continue
 		}
@@ -1398,16 +1525,15 @@ func parseDiagnosticBlock(lines []string) *Diagnostic {
 				severity = "warning"
 				summary = match[1]
 			} else {
-				details = append(details, trimmed)
+				details = append(details, DiagnosticLine{Content: richLineContent, IsMarker: markerPattern.MatchString(trimmed)})
 			}
 			continue
 		}
 
 		if severity != "" && i > 0 {
-			details = append(details, trimmed)
+			details = append(details, DiagnosticLine{Content: richLineContent, IsMarker: markerPattern.MatchString(trimmed)})
 		}
 	}
-
 	if severity == "" || summary == "" {
 		return nil
 	}

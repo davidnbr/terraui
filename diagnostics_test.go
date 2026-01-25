@@ -47,7 +47,7 @@ func TestLongDiagnosticMessage(t *testing.T) {
 	// Check details
 	foundLongDetail := false
 	for _, d := range diagnostic.Detail {
-		if len(d) == 10000 {
+		if len(d.Content) == 10000 {
 			foundLongDetail = true
 			break
 		}
@@ -59,7 +59,7 @@ func TestLongDiagnosticMessage(t *testing.T) {
 }
 
 func TestDiagnosticSummaryWrapping(t *testing.T) {
-	lipgloss.SetColorProfile(termenv.Ascii)
+	lipgloss.SetColorProfile(termenv.ANSI)
 	m := &Model{
 		width: 20,
 		diagnostics: []Diagnostic{
@@ -112,12 +112,29 @@ func TestRealWorldDiagnosticParsing(t *testing.T) {
 	// Check that details contain the Lorem ipsum text
 	foundLorem := false
 	for _, d := range diagnostic.Detail {
-		if strings.Contains(d, "Lorem ipsum") {
+		if strings.Contains(d.Content, "Lorem ipsum") {
 			foundLorem = true
 			break
 		}
 	}
 	if !foundLorem {
 		t.Error("expected details to contain Lorem ipsum line")
+	}
+
+	// Verify indentation preserved (roughly)
+	// Input: "│   on reproduce..." -> Content: "  on reproduce..."
+	foundOnLine := false
+	for _, d := range diagnostic.Detail {
+		if strings.Contains(d.Content, "on reproduce_long_error.tf") {
+			// Check leading spaces
+			if !strings.HasPrefix(d.Content, "  on") {
+				t.Errorf("expected indentation preserved for 'on reproduce...', got %q", d.Content)
+			}
+			foundOnLine = true
+			break
+		}
+	}
+	if !foundOnLine {
+		t.Error("expected to find 'on reproduce_long_error.tf' line")
 	}
 }

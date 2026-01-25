@@ -6,12 +6,12 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-func wrapText(text string, width int, indent int) []string {
+func wrapText(content string, width int, indent int) []string {
 	if width <= 0 {
-		return []string{text}
+		return []string{content}
 	}
 
-	if len(text) == 0 {
+	if len(content) == 0 {
 		return []string{""}
 	}
 
@@ -22,11 +22,11 @@ func wrapText(text string, width int, indent int) []string {
 	// Pre-generate indent string
 	indentStr := strings.Repeat(" ", indent)
 
-	// First line logic is slightly different (no prepended indent, it's in the text)
-	// But actually, the text passed in MIGHT have indentation already.
-	// We scan the text character by character.
+	// First line logic is slightly different (no prepended indent, it's in the content)
+	// But actually, the content passed in MIGHT have indentation already.
+	// We scan the content character by character.
 
-	runes := []rune(text)
+	runes := []rune(content)
 
 	// We simply iterate and break when visual width exceeds limit
 	for i := 0; i < len(runes); i++ {
@@ -61,9 +61,9 @@ func wrapText(text string, width int, indent int) []string {
 	return lines
 }
 
-func getIndentForLine(text string) int {
+func getIndentForLine(content string) int {
 	indent := 0
-	for _, r := range text {
+	for _, r := range content {
 		if r == ' ' {
 			indent++
 		} else {
@@ -74,7 +74,7 @@ func getIndentForLine(text string) int {
 	// If the line starts with a change symbol (+, -, ~),
 	// standard Terraform hangs indent after the symbol (usually 2 chars: "+ ").
 	// So we add 2 to the space indent.
-	trimmed := strings.TrimSpace(text)
+	trimmed := strings.TrimSpace(content)
 	if strings.HasPrefix(trimmed, "+") || strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "~") {
 		// Example: "    + attribute" -> 4 spaces. Symbol "+ " is 2. Total 6.
 		// Indent should be indent + 2.

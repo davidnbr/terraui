@@ -132,7 +132,7 @@ func TestDashboardModeColors(t *testing.T) {
 
 func TestRenderingModeLogic(t *testing.T) {
 	// Force color output for testing
-	lipgloss.SetColorProfile(termenv.TrueColor)
+	lipgloss.SetColorProfile(termenv.ANSI)
 
 	// Verify that the rendering logic produces different output for different modes
 	// even with the same palette.
@@ -294,5 +294,32 @@ func TestRebuildLinesWrapping(t *testing.T) {
 	}
 	if m.lines[3].Content != "    s\"" {
 		t.Errorf("Line 3 content mismatch: %q", m.lines[3].Content)
+	}
+}
+
+func TestDefensiveIndexing(t *testing.T) {
+	m := &Model{
+		diagnostics: []Diagnostic{
+			{
+				Severity: "error",
+				Summary:  "test error",
+				Detail:   []DiagnosticLine{{Content: "line 1"}},
+			},
+		},
+	}
+
+	// AttrIdx out of bounds (1 >= len(Detail)=1)
+	line := Line{
+		Type:    LineTypeDiagnosticDetail,
+		DiagIdx: 0,
+		AttrIdx: 1,
+		Content: "phantom content",
+	}
+
+	// Should not panic
+	output := m.renderDiagnosticDetailLine(line, false)
+	if output == "" {
+		// Expecting at least some padding + content even if detail lookup fails
+		// But if implementation returns "", that's also safe from panic.
 	}
 }
