@@ -14,9 +14,12 @@ Reviewing Terraform plans in the terminal can be overwhelming, especially with l
 
 ## Features
 
-- **Catppuccin Mocha Theme** - Modern, high-contrast, beautiful color palette (Vibrant Red, Green, Mauve, Sky).
+- **Catppuccin Mocha Theme** - Modern, beautiful color palette (Vibrant Red, Green, Mauve, Sky).
+- **Two Rendering Modes** - Switch between **Dashboard** (subtle, Terraform-like) and **HighContrast** (vivid colors) with `m`.
+- **Rich Error Formatting** - Bold file locations, underlined markers (`^`, `~`), and colored diagnostics matching Terraform CLI.
 - **Collapsible resource blocks** - Expand/collapse individual resources or all at once.
 - **Dual Views** - Automatically switches between **Plan View** (structured changes) and **Log View** (raw output like `init` or `apply` progress).
+- **Smart Text Wrapping** - Long lines wrap intelligently with preserved indentation.
 - **Streaming & Interactive** - Works with `terraform init` and `terraform apply`.
 - **Interactive Wrapper** - Run as a wrapper (`terraui terraform apply`) to handle "yes" confirmation prompts interactively.
 - **Log Auto-scrolling** - Automatically follows the output stream like `tail -f`.
@@ -94,10 +97,11 @@ In interactive mode:
 | `PgUp` / `PgDn`   | Scroll up/down half page                  |
 | `g` / `Home`      | Go to top                                 |
 | `G` / `End`       | Go to bottom                              |
-| `e`               | Expand all resources                      |
-| `c`               | Collapse all resources                    |
-| `L`               | Toggle between **Plan** and **Log** views |
-| `q` / `Ctrl+c`    | Quit                                      |
+| `e`               | Expand all resources                            |
+| `c`               | Collapse all resources                          |
+| `L`               | Toggle between **Plan** and **Log** views       |
+| `m`               | Toggle rendering mode (Dashboard / HighContrast)|
+| `q` / `Ctrl+c`    | Quit                                            |
 
 ### Input Mode (Interactive Wrapper)
 
@@ -134,6 +138,20 @@ Attributes within resources are also color-coded:
 - **Yellow** - Attribute being changed (`~ attribute = old -> new`)
 - **Dim gray** - Unchanged attributes (shown for context)
 
+## Rendering Modes
+
+Toggle between modes with `m`:
+
+| Mode            | Description                                                                 |
+| --------------- | --------------------------------------------------------------------------- |
+| **Dashboard**   | Subtle styling that mimics standard Terraform CLI output. Colors are applied to symbols and prefixes only, keeping the overall look clean and familiar. |
+| **HighContrast**| Vivid colors applied to entire lines for maximum visibility. Useful for accessibility or when reviewing in bright environments. |
+
+Both modes use the Catppuccin Mocha color palette and support:
+- **Bold** file location markers (e.g., `on main.tf line 7:`)
+- **Underlined** error markers (`^`, `~~~~`)
+- Colored structural guides (`│`, `├`, `─`)
+
 ## Supported Terraform Versions
 
 `terraui` works with:
@@ -148,10 +166,12 @@ Attributes within resources are also color-coded:
 `terraui` parses the human-readable Terraform plan output by:
 
 1. Detecting resource change headers (`# resource.name will be created/updated/destroyed`)
-2. Capturing the resource block and all its attributes.
-3. Stripping ANSI escape codes (for HCP Terraform compatibility).
-4. Running a PTY wrapper (via `github.com/creack/pty`) for interactive commands.
-5. Rendering an interactive TUI using [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+2. Capturing the resource block and all its attributes
+3. Parsing diagnostic blocks (errors/warnings) with semantic formatting preservation
+4. Sanitizing ANSI codes while preserving bold/underline formatting from Terraform
+5. Running a PTY wrapper (via `github.com/creack/pty`) for interactive commands
+6. Rendering an interactive TUI using [Bubble Tea](https://github.com/charmbracelet/bubbletea)
+7. Wrapping long lines intelligently with preserved indentation
 
 ## Contributing
 
