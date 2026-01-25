@@ -38,7 +38,7 @@ Terraform Plan
 ### High Contrast Mode
 
 Terraform Apply
-![Terraui Apply High Contrast Mode](https://github.com/user-attachments/assets/1ee151bc-a7cb-454b-b0fc-c1a6a74351c9)
+![Terraui Apply High Contrast Mode](https://github.com/user-attachments/assets/eeef52c0-8dd6-4907-a71d-161a6d046c35)
 Terraform Plan
 ![Terraui Plan High Contrast Mode](https://github.com/user-attachments/assets/f01ef86c-ab11-476e-be20-ea3eb900b30c)
 
