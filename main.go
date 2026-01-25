@@ -65,10 +65,8 @@ type Theme struct {
 	Warning lipgloss.Style
 	Prompt  lipgloss.Style
 
-	// Rich formatting for diagnostics
-	BoldError   lipgloss.Style
-	BoldWarning lipgloss.Style
-	Underline   lipgloss.Style
+	// Rich formatting for diagnostic markers (^ and ~ underlines)
+	Underline lipgloss.Style
 
 	AddAttr    lipgloss.Style
 	RemoveAttr lipgloss.Style
@@ -157,10 +155,17 @@ type Model struct {
 	// Concurrency
 	streamChan chan StreamMsg     // Channel for receiving parsed content
 	cancelFunc context.CancelFunc // For signaling goroutine shutdown
+
+	// Cached theme to avoid repeated allocations during rendering
+	cachedTheme *Theme
 }
 
 func (m *Model) theme() Theme {
-	return getTheme(m.renderingMode)
+	if m.cachedTheme == nil {
+		t := getTheme(m.renderingMode)
+		m.cachedTheme = &t
+	}
+	return *m.cachedTheme
 }
 
 func createGuideReplacer(style lipgloss.Style) *strings.Replacer {
@@ -189,9 +194,7 @@ func getTheme(mode RenderingMode) Theme {
 			Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
 			Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
 
-			BoldError:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
-			BoldWarning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
-			Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Underline(true).Bold(true),
+			Underline: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Underline(true).Bold(true),
 
 			AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
 			RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
@@ -223,9 +226,7 @@ func getTheme(mode RenderingMode) Theme {
 		Warning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
 		Prompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")).Bold(true),
 
-		BoldError:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Bold(true),
-		BoldWarning: lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
-		Underline:   lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Underline(true).Bold(true),
+		Underline: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")).Underline(true).Bold(true),
 
 		AddAttr:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")),
 		RemoveAttr: lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5555")),
@@ -593,6 +594,7 @@ func (m *Model) toggleRenderingMode() {
 	} else {
 		m.renderingMode = RenderingModeDashboard
 	}
+	m.cachedTheme = nil // Invalidate cache so theme() regenerates it
 }
 
 // Update implements tea.Model. Handles all messages and user input.
@@ -1040,9 +1042,9 @@ func (m Model) renderDiagnosticLine(line Line, isSelected bool) string {
 		} else {
 			// In Dashboard, we style the prefix text
 			if diag.Severity == "error" {
-				prefix += t.BoldError.Render("Error: ")
+				prefix += t.Error.Render("Error: ")
 			} else if diag.Severity == "warning" {
-				prefix += t.BoldWarning.Render("Warning: ")
+				prefix += t.Warning.Render("Warning: ")
 			}
 		}
 	} else {
@@ -1110,7 +1112,10 @@ func (m Model) renderDiagnosticDetailLine(line Line, isSelected bool) string {
 	if isSelected {
 		return t.Selected.Render("►   " + richLine)
 	}
-	// Add explicit reset for bold/underline to prevent leaking
+	// \x1b[22;24m resets bold (22) and underline (24) without a full reset ([0m).
+	// This prevents formatting from leaking to subsequent lines while preserving
+	// any color state that lipgloss may have set. We can't use lipgloss for this
+	// because it doesn't provide a "reset formatting only" style.
 	return "    " + richLine + "\x1b[22;24m"
 }
 
