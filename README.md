@@ -28,13 +28,19 @@ Reviewing Terraform plans in the terminal can be overwhelming, especially with l
 
 ## How it looks
 
-### Terraform Apply
+### Dashboard (Normal) Mode
 
-![Terraui Apply Demo](https://github.com/user-attachments/assets/7a867f0c-6d93-4d8a-b377-ad624182b89c)
+Terraform Apply
+![Terraform Apply Normal Mode](https://github.com/user-attachments/assets/1e0cf290-bc0c-4136-bf98-f38275e99c1b)
+Terraform Plan
+![Terraform Plan Normal Mode](https://github.com/user-attachments/assets/ed5d24fe-6847-4d0e-8e6c-b9466d77fb21)
 
-### Terraform Plan
+### High Contrast Mode
 
-![Terraui Plan Demo](https://github.com/user-attachments/assets/045a349d-dbce-4892-95b2-9e8d132fc974)
+Terraform Apply
+![Terraui Apply High Contrast Mode](https://github.com/user-attachments/assets/eeef52c0-8dd6-4907-a71d-161a6d046c35)
+Terraform Plan
+![Terraui Plan High Contrast Mode](https://github.com/user-attachments/assets/f01ef86c-ab11-476e-be20-ea3eb900b30c)
 
 ## Installation
 
@@ -87,21 +93,21 @@ In interactive mode:
 
 ### General & Navigation
 
-| Key               | Action                                    |
-| ----------------- | ----------------------------------------- |
-| `↑` / `k`         | Move cursor up                            |
-| `↓` / `j`         | Move cursor down                          |
-| `Enter` / `Space` | Expand/collapse resource (in Plan View)   |
-| `Ctrl+u`          | Scroll up half page                       |
-| `Ctrl+d`          | Scroll down half page                     |
-| `PgUp` / `PgDn`   | Scroll up/down half page                  |
-| `g` / `Home`      | Go to top                                 |
-| `G` / `End`       | Go to bottom                              |
-| `e`               | Expand all resources                            |
-| `c`               | Collapse all resources                          |
-| `L`               | Toggle between **Plan** and **Log** views       |
-| `m`               | Toggle rendering mode (Dashboard / HighContrast)|
-| `q` / `Ctrl+c`    | Quit                                            |
+| Key               | Action                                           |
+| ----------------- | ------------------------------------------------ |
+| `↑` / `k`         | Move cursor up                                   |
+| `↓` / `j`         | Move cursor down                                 |
+| `Enter` / `Space` | Expand/collapse resource (in Plan View)          |
+| `Ctrl+u`          | Scroll up half page                              |
+| `Ctrl+d`          | Scroll down half page                            |
+| `PgUp` / `PgDn`   | Scroll up/down half page                         |
+| `g` / `Home`      | Go to top                                        |
+| `G` / `End`       | Go to bottom                                     |
+| `e`               | Expand all resources                             |
+| `c`               | Collapse all resources                           |
+| `L`               | Toggle between **Plan** and **Log** views        |
+| `m`               | Toggle rendering mode (Dashboard / HighContrast) |
+| `q` / `Ctrl+c`    | Quit                                             |
 
 ### Input Mode (Interactive Wrapper)
 
@@ -142,12 +148,13 @@ Attributes within resources are also color-coded:
 
 Toggle between modes with `m`:
 
-| Mode            | Description                                                                 |
-| --------------- | --------------------------------------------------------------------------- |
-| **Dashboard**   | Subtle styling that mimics standard Terraform CLI output. Colors are applied to symbols and prefixes only, keeping the overall look clean and familiar. |
-| **HighContrast**| Vivid colors applied to entire lines for maximum visibility. Useful for accessibility or when reviewing in bright environments. |
+| Mode             | Description                                                                                                                                             |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Dashboard**    | Subtle styling that mimics standard Terraform CLI output. Colors are applied to symbols and prefixes only, keeping the overall look clean and familiar. |
+| **HighContrast** | Vivid colors applied to entire lines for maximum visibility. Useful for accessibility or when reviewing in bright environments.                         |
 
 Both modes use the Catppuccin Mocha color palette and support:
+
 - **Bold** file location markers (e.g., `on main.tf line 7:`)
 - **Underlined** error markers (`^`, `~~~~`)
 - Colored structural guides (`│`, `├`, `─`)
