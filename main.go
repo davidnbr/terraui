@@ -292,6 +292,18 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 
 		// Diagnostic block handling
 		if strings.HasPrefix(cleanLine, "╷") {
+			// If we're already in a diagnostic block, process the previous one
+			// before starting a new one (handles missing ╵ between blocks)
+			if inDiagnostic && len(diagLines) > 0 {
+				diag := parseDiagnosticBlock(diagLines)
+				if diag != nil {
+					select {
+					case m.streamChan <- StreamMsg{Diagnostic: diag}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
 			inDiagnostic = true
 			diagLines = make([]string, 0)
 			return
@@ -312,7 +324,16 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 			return
 		}
 		if inDiagnostic {
-			richLineContent := strings.TrimPrefix(richLine, "│")
+			// Use cleanLine (fully stripped) to detect │ prefix, then strip from
+			// richLine at the same position. This handles cases where ANSI
+			// formatting codes (bold/underline) precede the │ character.
+			richLineContent := richLine
+			if strings.HasPrefix(cleanLine, "│") {
+				// Find │ in richLine and strip everything up to and including it
+				if idx := strings.Index(richLine, "│"); idx >= 0 {
+					richLineContent = richLine[idx+len("│"):]
+				}
+			}
 			diagLines = append(diagLines, richLineContent)
 			return
 		}
@@ -419,6 +440,17 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 		}
 		if err != nil {
 			break
+		}
+	}
+
+	// Flush any pending diagnostic block (stream ended without closing ╵)
+	if inDiagnostic && len(diagLines) > 0 {
+		diag := parseDiagnosticBlock(diagLines)
+		if diag != nil {
+			select {
+			case m.streamChan <- StreamMsg{Diagnostic: diag}:
+			case <-ctx.Done():
+			}
 		}
 	}
 
@@ -1534,8 +1566,36 @@ func parseDiagnosticBlock(richLines []string) *Diagnostic {
 			details = append(details, DiagnosticLine{Content: richLineContent, IsMarker: markerPattern.MatchString(trimmed)})
 		}
 	}
+	// Fallback: if no Error:/Warning: prefix was found, preserve the content
+	// as an error diagnostic so no information is lost. Diagnostic blocks (╷...╵)
+	// always indicate problems that the user needs to see.
 	if severity == "" || summary == "" {
-		return nil
+		var nonEmptyLines []string
+		for _, rl := range richLines {
+			clean := stripANSI(rl)
+			trimmed := strings.TrimSpace(clean)
+			if trimmed != "" {
+				content := rl
+				if strings.HasPrefix(content, " ") {
+					content = content[1:]
+				}
+				nonEmptyLines = append(nonEmptyLines, content)
+			}
+		}
+		if len(nonEmptyLines) == 0 {
+			return nil
+		}
+		// Use first non-empty line as summary, rest as details
+		summary = stripANSI(nonEmptyLines[0])
+		severity = "error"
+		details = nil
+		for _, line := range nonEmptyLines[1:] {
+			clean := stripANSI(line)
+			details = append(details, DiagnosticLine{
+				Content:  line,
+				IsMarker: markerPattern.MatchString(strings.TrimSpace(clean)),
+			})
+		}
 	}
 
 	return &Diagnostic{
