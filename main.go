@@ -563,7 +563,23 @@ func (m *Model) rebuildLines() {
 
 	if m.showLogs {
 		// LOG view: show all output including logs and diagnostics
-		// First show diagnostics (errors/warnings) with full formatting
+		// First show regular logs (terraform output in chronological order)
+		for i, log := range m.logs {
+			// Wrap log lines
+			// renderLogLine adds 2 spaces padding/cursor
+			// So we wrap at width - 2
+			wrapped := wrapText(log, m.width-2, 0)
+			for _, w := range wrapped {
+				m.lines = append(m.lines, Line{
+					Type:    LineTypeLog,
+					Content: w,
+					AttrIdx: i,
+				})
+			}
+		}
+
+		// Then show diagnostics (errors/warnings) at the end where they're most visible
+		// This ensures errors appear after the normal terraform output
 		for i, diag := range m.diagnostics {
 			// Wrap summary (accounting for 4 chars prefix: "▸ ✗ ")
 			wrappedSummary := wrapText(diag.Summary, m.width-4, 0)
@@ -591,21 +607,6 @@ func (m *Model) rebuildLines() {
 						Content:     w,
 					})
 				}
-			}
-		}
-
-		// Then show regular logs
-		for i, log := range m.logs {
-			// Wrap log lines
-			// renderLogLine adds 2 spaces padding/cursor
-			// So we wrap at width - 2
-			wrapped := wrapText(log, m.width-2, 0)
-			for _, w := range wrapped {
-				m.lines = append(m.lines, Line{
-					Type:    LineTypeLog,
-					Content: w,
-					AttrIdx: i,
-				})
 			}
 		}
 		return
