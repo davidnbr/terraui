@@ -489,6 +489,12 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 		}
 	}
 
+	// Flush any remaining content in line buffer (last line without trailing newline)
+	if strings.TrimSpace(lineBuffer) != "" {
+		processLine(lineBuffer)
+		lineBuffer = ""
+	}
+
 	// Flush any pending diagnostic block (stream ended without closing ╵)
 	if inDiagnostic && len(diagLines) > 0 {
 		diag := parseDiagnosticBlock(diagLines)
@@ -1621,8 +1627,9 @@ func parseDiagnosticBlock(richLines []string) *Diagnostic {
 
 	var severity, summary string
 	var details []DiagnosticLine
+	var preSeverityLines []DiagnosticLine // Lines before Error:/Warning: header
 
-	for i, richLine := range richLines {
+	for _, richLine := range richLines {
 		// Clean text for regex matching and empty line detection
 		cleanLine := stripANSI(richLine)
 		trimmed := strings.TrimSpace(cleanLine)
@@ -1662,9 +1669,17 @@ func parseDiagnosticBlock(richLines []string) *Diagnostic {
 			continue
 		}
 
-		if severity != "" && i > 0 {
+		if severity != "" {
 			details = append(details, DiagnosticLine{Content: richLineContent, IsMarker: markerPattern.MatchString(trimmed)})
+		} else {
+			// Lines before severity header - preserved and prepended to details
+			preSeverityLines = append(preSeverityLines, DiagnosticLine{Content: richLineContent, IsMarker: markerPattern.MatchString(trimmed)})
 		}
+	}
+
+	// Prepend any lines that appeared before the Error:/Warning: header
+	if severity != "" && len(preSeverityLines) > 0 {
+		details = append(preSeverityLines, details...)
 	}
 	// Fallback: if no Error:/Warning: prefix was found, preserve the content
 	// as an error diagnostic so no information is lost. Diagnostic blocks (╷...╵)
