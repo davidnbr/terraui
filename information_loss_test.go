@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 )
@@ -411,53 +412,31 @@ func TestParseDiagnosticBlock_OnlyWhitespace(t *testing.T) {
 // =============================================================================
 
 func TestEmptyInputDetection_NoContent(t *testing.T) {
-	// Simulate pipe mode with no input (ptyFile is nil)
-	m := &Model{
+	// Pipe mode with no input: ptyFile is nil, no content received
+	m := Model{
 		streamChan: make(chan StreamMsg, 10),
-		ptyFile:    nil, // Pipe mode
+		ptyFile:    nil,
 	}
 
-	// Empty input
-	input := ""
+	// Send Done message through the actual Update method
+	result, _ := m.Update(StreamMsg{Done: true})
+	updated := result.(Model)
 
-	// Collect stream messages
-	_, _, _ = collectStreamMsgs(m, input)
-
-	// Simulate what happens in Update when Done message is received
-	// The warning is added to m.diagnostics when stream ends with no content in pipe mode
-	if !m.receivedContent && m.ptyFile == nil {
-		warning := Diagnostic{
-			Severity: "warning",
-			Summary:  "No input received from Terraform - errors may have been sent to stderr",
-			Detail: []DiagnosticLine{
-				{Content: "Terraform sends error messages to stderr, not stdout."},
-				{Content: "When piping Terraform output to terraui, use: terraform plan 2>&1 | terraui"},
-				{Content: "Or use interactive mode: terraui terraform plan"},
-			},
-			Expanded: true,
-		}
-		m.diagnostics = append(m.diagnostics, warning)
+	if len(updated.diagnostics) != 1 {
+		t.Fatalf("Expected 1 warning diagnostic for empty input, got %d", len(updated.diagnostics))
 	}
 
-	// Should have a warning diagnostic about missing stderr redirection
-	if len(m.diagnostics) != 1 {
-		t.Fatalf("Expected 1 warning diagnostic for empty input, got %d", len(m.diagnostics))
-	}
-
-	diag := m.diagnostics[0]
+	diag := updated.diagnostics[0]
 	if diag.Severity != "warning" {
 		t.Errorf("Expected severity 'warning', got %q", diag.Severity)
 	}
-
 	if !strings.Contains(diag.Summary, "No input received") {
 		t.Errorf("Expected warning about no input, got: %q", diag.Summary)
 	}
-
 	if !strings.Contains(diag.Summary, "stderr") {
 		t.Errorf("Expected warning to mention stderr, got: %q", diag.Summary)
 	}
 
-	// Verify helpful suggestions are in details
 	foundSuggestion := false
 	for _, detail := range diag.Detail {
 		if strings.Contains(detail.Content, "2>&1") || strings.Contains(detail.Content, "interactive mode") {
@@ -471,92 +450,65 @@ func TestEmptyInputDetection_NoContent(t *testing.T) {
 }
 
 func TestEmptyInputDetection_OnlyWhitespace(t *testing.T) {
-	// Simulate pipe mode with only whitespace input
-	m := &Model{
+	// Pipe mode with whitespace-only input: receivedContent stays false
+	m := Model{
 		streamChan: make(chan StreamMsg, 10),
-		ptyFile:    nil, // Pipe mode
+		ptyFile:    nil,
 	}
 
-	// Only whitespace input
-	input := "   \n\t\n   \n"
+	collectStreamMsgs(&m, "   \n\t\n   \n")
 
-	// Collect stream messages
-	_, _, _ = collectStreamMsgs(m, input)
+	// Send Done through actual Update method
+	result, _ := m.Update(StreamMsg{Done: true})
+	updated := result.(Model)
 
-	// Simulate what happens in Update when Done message is received
-	// The warning is added to m.diagnostics when stream ends with no content in pipe mode
-	if !m.receivedContent && m.ptyFile == nil {
-		warning := Diagnostic{
-			Severity: "warning",
-			Summary:  "No input received from Terraform - errors may have been sent to stderr",
-			Detail: []DiagnosticLine{
-				{Content: "Terraform sends error messages to stderr, not stdout."},
-				{Content: "When piping Terraform output to terraui, use: terraform plan 2>&1 | terraui"},
-				{Content: "Or use interactive mode: terraui terraform plan"},
-			},
-			Expanded: true,
-		}
-		m.diagnostics = append(m.diagnostics, warning)
+	if len(updated.diagnostics) != 1 {
+		t.Fatalf("Expected 1 warning diagnostic for whitespace-only input, got %d", len(updated.diagnostics))
 	}
-
-	// Should have a warning diagnostic since no meaningful content was received
-	if len(m.diagnostics) != 1 {
-		t.Fatalf("Expected 1 warning diagnostic for whitespace-only input, got %d", len(m.diagnostics))
-	}
-
-	if m.diagnostics[0].Severity != "warning" {
-		t.Errorf("Expected severity 'warning', got %q", m.diagnostics[0].Severity)
+	if updated.diagnostics[0].Severity != "warning" {
+		t.Errorf("Expected severity 'warning', got %q", updated.diagnostics[0].Severity)
 	}
 }
 
 func TestEmptyInputDetection_WithContent(t *testing.T) {
-	// Simulate pipe mode with actual content - should NOT show warning
-	m := &Model{
+	// Pipe mode with actual content: receivedContent is true, no warning
+	m := Model{
 		streamChan: make(chan StreamMsg, 10),
-		ptyFile:    nil, // Pipe mode
+		ptyFile:    nil,
 	}
 
-	// Actual Terraform output
-	input := "Terraform used the selected providers to generate the following execution plan.\n"
+	_, logs, _ := collectStreamMsgs(&m, "Terraform used the selected providers to generate the following execution plan.\n")
 
-	_, logs, _ := collectStreamMsgs(m, input)
+	result, _ := m.Update(StreamMsg{Done: true})
+	updated := result.(Model)
 
-	// Simulate what happens in Update when Done message is received
-	// The warning is added to m.diagnostics when stream ends with no content in pipe mode
-	if !m.receivedContent && m.ptyFile == nil {
-		warning := Diagnostic{
-			Severity: "warning",
-			Summary:  "No input received from Terraform - errors may have been sent to stderr",
-			Detail: []DiagnosticLine{
-				{Content: "Terraform sends error messages to stderr, not stdout."},
-				{Content: "When piping Terraform output to terraui, use: terraform plan 2>&1 | terraui"},
-				{Content: "Or use interactive mode: terraui terraform plan"},
-			},
-			Expanded: true,
-		}
-		m.diagnostics = append(m.diagnostics, warning)
-	}
-
-	// Should NOT have the empty input warning
-	for _, d := range m.diagnostics {
+	for _, d := range updated.diagnostics {
 		if strings.Contains(d.Summary, "No input received") {
 			t.Error("Should not show empty input warning when content was received")
 		}
 	}
 
-	// Should have the log line
 	if len(logs) != 1 {
 		t.Errorf("Expected 1 log line, got %d", len(logs))
 	}
 }
 
 func TestEmptyInputDetection_PTYMode(t *testing.T) {
-	// Simulate PTY mode (interactive) - should NOT show warning even with no input
-	// We can't easily test with actual PTY, but we can verify the logic by checking
-	// that the warning is only added when ptyFile is nil
-	// The warning should only appear in pipe mode, not PTY mode
-	// This is implicitly tested by the other tests, but we document the expectation here
-	t.Log("PTY mode should not show empty input warning - interactive mode captures both streams")
+	// PTY mode (ptyFile != nil): warning should NOT appear even with no content
+	m := Model{
+		streamChan:      make(chan StreamMsg, 10),
+		ptyFile:         os.Stderr, // Non-nil signals PTY mode
+		receivedContent: false,
+	}
+
+	result, _ := m.Update(StreamMsg{Done: true})
+	updated := result.(Model)
+
+	for _, d := range updated.diagnostics {
+		if strings.Contains(d.Summary, "No input received") {
+			t.Error("PTY mode should not show empty input warning")
+		}
+	}
 }
 
 // =============================================================================

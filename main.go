@@ -133,7 +133,6 @@ type exitCodeMsg struct {
 	hasError bool
 }
 
-// exitCodeMsg carries the exit code when terraform command completes
 // Model holds the application state for the Bubble Tea framework
 type Model struct {
 	// Data
@@ -918,8 +917,6 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if _, err := m.ptyFile.Write([]byte(payload)); err != nil {
 				// PTY write failed - log to stderr for debugging
 				fmt.Fprintf(os.Stderr, "[ERROR] Failed to write to PTY: %v\n", err)
-			} else {
-				// Debug: log successful write
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "[ERROR] PTY file is nil, cannot write input\n")
@@ -1732,45 +1729,54 @@ func main() {
 		ptyFile:       ptyFile,
 		streamChan:    make(chan StreamMsg, streamBufferSize),
 		exitCode:      -1, // -1 means not yet set
-		hasError:      false,
 	}
 
 	// Handle signals for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Channel to capture exit code
+	// exitChan carries the exit code; cmdDone is closed when cmd.Wait() returns.
+	// Only the Wait goroutine calls cmd.Wait() to avoid double-wait issues.
 	exitChan := make(chan int, 1)
+	cmdDone := make(chan struct{})
 
-	// Cleanup function for PTY and process
+	// Start the sole goroutine that waits for command completion
+	if cmd != nil {
+		go func() {
+			defer close(cmdDone)
+			err := cmd.Wait()
+			var exitCode int
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					exitCode = exitErr.ExitCode()
+				} else {
+					exitCode = 1
+				}
+			}
+			exitChan <- exitCode
+		}()
+	} else {
+		close(cmdDone)
+		go func() {
+			exitChan <- 0
+		}()
+	}
+
+	// Cleanup function for PTY and process signaling.
+	// Does NOT call cmd.Wait() -- the Wait goroutine above is the sole waiter.
 	cleanup := func() {
 		if ptyFile != nil {
 			ptyFile.Close()
 		}
 		if cmd != nil && cmd.Process != nil {
-			// Try graceful shutdown first
 			cmd.Process.Signal(syscall.SIGTERM)
-
-			// Wait with timeout
-			done := make(chan error, 1)
-			go func() { done <- cmd.Wait() }()
-
 			select {
-			case <-done:
-				// Process exited - capture exit code
-				if cmd.ProcessState != nil {
-					exitChan <- cmd.ProcessState.ExitCode()
-				} else {
-					exitChan <- 1 // Assume error if no process state
-				}
+			case <-cmdDone:
+				// Process exited gracefully
 			case <-time.After(processShutdownTimeout):
-				// Force kill if still running
 				cmd.Process.Kill()
-				<-done
-				exitChan <- 1 // Killed process = error
+				<-cmdDone
 			}
-		} else {
-			exitChan <- 0 // No command = success
 		}
 	}
 
@@ -1780,29 +1786,6 @@ func main() {
 		cleanup()
 		os.Exit(0)
 	}()
-
-	// Start goroutine to wait for command completion and send exit code to model
-	if cmd != nil {
-		go func() {
-			err := cmd.Wait()
-			var exitCode int
-			if err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					exitCode = exitErr.ExitCode()
-				} else {
-					exitCode = 1
-				}
-			} else {
-				exitCode = 0
-			}
-			exitChan <- exitCode
-		}()
-	} else {
-		// Pipe mode - no command to wait for
-		go func() {
-			exitChan <- 0
-		}()
-	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
