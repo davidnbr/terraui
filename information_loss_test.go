@@ -999,3 +999,407 @@ func TestAzureMultipleErrors(t *testing.T) {
 		t.Errorf("Second diagnostic incorrect: %q", diagnostics[1].Summary)
 	}
 }
+
+// =============================================================================
+// Bug fix: lineBuffer flush at EOF (last line without trailing newline)
+// =============================================================================
+
+func TestLineBufferFlushAtEOF_SingleLine(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	// Input WITHOUT trailing newline - must still be captured
+	input := "Error: something went wrong"
+
+	_, logs, _ := collectStreamMsgs(m, input)
+
+	allLogs := strings.Join(logs, "\n")
+	if !strings.Contains(allLogs, "something went wrong") {
+		t.Fatal("BUG: Last line without trailing newline was silently dropped")
+	}
+}
+
+func TestLineBufferFlushAtEOF_AfterNewlines(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	// Multiple lines, last one has no trailing newline
+	input := "Line one\nLine two\nLine three without newline"
+
+	_, logs, _ := collectStreamMsgs(m, input)
+
+	if len(logs) != 3 {
+		t.Fatalf("Expected 3 log lines, got %d: %v", len(logs), logs)
+	}
+
+	allLogs := strings.Join(logs, "\n")
+	if !strings.Contains(allLogs, "Line three without newline") {
+		t.Fatal("BUG: Final line without trailing newline was dropped")
+	}
+}
+
+func TestLineBufferFlushAtEOF_DiagnosticThenText(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	// Diagnostic block followed by text without trailing newline
+	input := "╷\n│ Error: GCP auth failed\n╵\nFinal status: check logs"
+
+	diagnostics, logs, _ := collectStreamMsgs(m, input)
+
+	if len(diagnostics) == 0 {
+		t.Fatal("Expected diagnostic to be parsed")
+	}
+
+	allLogs := strings.Join(logs, "\n")
+	if !strings.Contains(allLogs, "Final status: check logs") {
+		t.Fatal("BUG: Text after diagnostic block without trailing newline was dropped")
+	}
+}
+
+// =============================================================================
+// Bug fix: pre-severity lines preserved in parseDiagnosticBlock
+// =============================================================================
+
+func TestPreSeverityLinesPreserved(t *testing.T) {
+	// Lines before Error:/Warning: in a diagnostic block must not be dropped
+	lines := []string{
+		" Some context from the provider",
+		" Error: The actual error message",
+		" Detail line here",
+	}
+
+	diag := parseDiagnosticBlock(lines)
+	if diag == nil {
+		t.Fatal("Expected diagnostic to be parsed")
+	}
+
+	if diag.Summary != "The actual error message" {
+		t.Errorf("Expected summary 'The actual error message', got %q", diag.Summary)
+	}
+
+	// The pre-severity context line MUST be in details
+	allDetails := ""
+	for _, d := range diag.Detail {
+		allDetails += d.Content + " "
+	}
+
+	if !strings.Contains(allDetails, "context from the provider") {
+		t.Fatal("BUG: Line before Error: prefix was silently dropped from diagnostic details")
+	}
+}
+
+func TestPreSeverityLinesPreserved_MultipleLines(t *testing.T) {
+	lines := []string{
+		" Provider context line 1",
+		" Provider context line 2",
+		" Warning: Deprecated resource type",
+		" Use the new resource type instead",
+	}
+
+	diag := parseDiagnosticBlock(lines)
+	if diag == nil {
+		t.Fatal("Expected diagnostic to be parsed")
+	}
+
+	if diag.Severity != "warning" {
+		t.Errorf("Expected severity 'warning', got %q", diag.Severity)
+	}
+
+	allDetails := ""
+	for _, d := range diag.Detail {
+		allDetails += d.Content + " "
+	}
+
+	if !strings.Contains(allDetails, "context line 1") {
+		t.Error("BUG: First pre-severity line was dropped")
+	}
+	if !strings.Contains(allDetails, "context line 2") {
+		t.Error("BUG: Second pre-severity line was dropped")
+	}
+	if !strings.Contains(allDetails, "new resource type") {
+		t.Error("Post-severity detail line was dropped")
+	}
+}
+
+func TestPreSeverityLinesPreserved_FullStream(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	// Full stream with diagnostic block that has pre-severity context
+	input := "╷\n│ hashicorp/google: provider context\n│ Error: Failed to create resource\n│   on main.tf line 5\n╵\n"
+
+	diagnostics, _, _ := collectStreamMsgs(m, input)
+
+	if len(diagnostics) == 0 {
+		t.Fatal("Expected diagnostic to be parsed")
+	}
+
+	allContent := diagnostics[0].Summary
+	for _, d := range diagnostics[0].Detail {
+		allContent += " " + d.Content
+	}
+
+	if !strings.Contains(allContent, "provider context") {
+		t.Fatal("BUG: Pre-severity context line lost in full stream processing")
+	}
+	if !strings.Contains(allContent, "Failed to create resource") {
+		t.Error("Error summary was lost")
+	}
+}
+
+// =============================================================================
+// Zero-loss invariant: every meaningful input line appears in output
+// =============================================================================
+
+// extractAllOutput collects all text content from diagnostics, logs, and resources
+// into a single string for verification.
+func extractAllOutput(diagnostics []*Diagnostic, logs []string, resources []*ResourceChange) string {
+	var parts []string
+	for _, d := range diagnostics {
+		parts = append(parts, d.Summary)
+		for _, detail := range d.Detail {
+			if detail.Content != "" {
+				parts = append(parts, detail.Content)
+			}
+		}
+	}
+	for _, l := range logs {
+		parts = append(parts, l)
+	}
+	for _, r := range resources {
+		parts = append(parts, r.Address)
+		parts = append(parts, r.Attributes...)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// meaningfulLines extracts non-empty, non-structural lines from terraform input.
+// Structural characters (╷, ╵, │ prefix) and severity prefixes (Error:, Warning:)
+// are stripped because parseDiagnosticBlock decomposes them into Severity + Summary
+// fields — the actual information content is preserved, just in structured form.
+func meaningfulLines(input string) []string {
+	var lines []string
+	for _, raw := range strings.Split(input, "\n") {
+		clean := strings.TrimSpace(raw)
+		// Skip empty lines
+		if clean == "" {
+			continue
+		}
+		// Skip pure structural markers
+		if clean == "╷" || clean == "╵" {
+			continue
+		}
+		// Strip │ prefix to get content
+		if strings.HasPrefix(clean, "│") {
+			clean = strings.TrimSpace(strings.TrimPrefix(clean, "│"))
+			if clean == "" {
+				continue // Empty line inside diagnostic block
+			}
+		}
+		// Strip severity prefixes — these become the Severity field in Diagnostic,
+		// so the content after them is what we verify in the output.
+		if strings.HasPrefix(clean, "Error: ") {
+			clean = strings.TrimPrefix(clean, "Error: ")
+		} else if strings.HasPrefix(clean, "Warning: ") {
+			clean = strings.TrimPrefix(clean, "Warning: ")
+		}
+		lines = append(lines, clean)
+	}
+	return lines
+}
+
+func TestZeroLossInvariant_MixedOutput(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	input := `Initializing the backend...
+Initializing provider plugins...
+- Finding hashicorp/google versions matching "~> 4.0"...
+- Installing hashicorp/google v4.84.0...
+- Installed hashicorp/google v4.84.0
+Terraform has been successfully initialized!
+╷
+│ Error: Error creating Instance: googleapi: Error 400: Invalid value
+│
+│   with google_compute_instance.default,
+│   on main.tf line 10
+│
+╵
+╷
+│ Warning: Deprecated resource
+│
+│ Consider using the new resource type instead.
+╵
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+`
+
+	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	allOutput := extractAllOutput(diagnostics, logs, resources)
+
+	for _, line := range meaningfulLines(input) {
+		if !strings.Contains(allOutput, line) {
+			t.Errorf("ZERO-LOSS VIOLATION: line not found in output: %q", line)
+		}
+	}
+}
+
+func TestZeroLossInvariant_AWSErrors(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	input := `Planning...
+╷
+│ Error: creating EC2 Instance: InvalidInstanceType: t99.xlarge not supported
+│
+│   with aws_instance.web,
+│   on main.tf line 5
+│
+╵
+╷
+│ Error: creating S3 Bucket: BucketAlreadyExists: my-bucket is taken
+│
+│   with aws_s3_bucket.data,
+│   on s3.tf line 1
+│
+╵
+Plan failed with 2 errors.
+`
+
+	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	allOutput := extractAllOutput(diagnostics, logs, resources)
+
+	for _, line := range meaningfulLines(input) {
+		if !strings.Contains(allOutput, line) {
+			t.Errorf("ZERO-LOSS VIOLATION: line not found in output: %q", line)
+		}
+	}
+}
+
+func TestZeroLossInvariant_AzureErrors(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	input := `azurerm provider configuration...
+╷
+│ Error: creating Resource Group: StatusCode=404 Code="ResourceGroupNotFound"
+│
+│   with azurerm_resource_group.main,
+│   on main.tf line 8
+│
+╵
+╷
+│ Error: creating Virtual Network: StatusCode=403 Code="AuthorizationFailed"
+│
+│   with azurerm_virtual_network.main,
+│   on network.tf line 5
+│
+╵
+Error: Terraform exited with 2 errors.
+`
+
+	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	allOutput := extractAllOutput(diagnostics, logs, resources)
+
+	for _, line := range meaningfulLines(input) {
+		if !strings.Contains(allOutput, line) {
+			t.Errorf("ZERO-LOSS VIOLATION: line not found in output: %q", line)
+		}
+	}
+}
+
+func TestZeroLossInvariant_NonStandardFormats(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	input := `[INFO] Starting custom provider
+[ERROR] Authentication failed for on-premise endpoint
+panic: runtime error: nil pointer dereference
+goroutine 1 [running]:
+FATAL: connection to 10.0.0.5:8080 refused
+╷
+│ Provider crashed without standard Error: prefix
+│ The plugin logs may contain more details
+╵
+Recovery suggestion: restart the provider
+`
+
+	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	allOutput := extractAllOutput(diagnostics, logs, resources)
+
+	for _, line := range meaningfulLines(input) {
+		if !strings.Contains(allOutput, line) {
+			t.Errorf("ZERO-LOSS VIOLATION: line not found in output: %q", line)
+		}
+	}
+}
+
+func TestZeroLossInvariant_NoTrailingNewline(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	// No trailing newline on last line
+	input := "First line\nSecond line\nThird line without newline"
+
+	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	allOutput := extractAllOutput(diagnostics, logs, resources)
+
+	for _, line := range meaningfulLines(input) {
+		if !strings.Contains(allOutput, line) {
+			t.Errorf("ZERO-LOSS VIOLATION: line not found in output: %q", line)
+		}
+	}
+}
+
+func TestZeroLossInvariant_FullPlanWithResources(t *testing.T) {
+	m := &Model{streamChan: make(chan StreamMsg, 10)}
+
+	input := `Terraform used the selected providers to generate the following execution plan.
+Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # google_compute_instance.web will be created
+  + resource "google_compute_instance" "web" {
+      + name         = "web-server"
+      + machine_type = "e2-medium"
+      + zone         = "us-central1-a"
+    }
+
+  # aws_s3_bucket.logs will be created
+  + resource "aws_s3_bucket" "logs" {
+      + bucket = "my-app-logs"
+      + acl    = "private"
+    }
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+╷
+│ Warning: Deprecated attribute
+│
+│ The "acl" attribute is deprecated. Use aws_s3_bucket_acl instead.
+╵
+`
+
+	diagnostics, logs, resources := collectStreamMsgs(m, input)
+
+	// Resources must be parsed
+	if len(resources) < 2 {
+		t.Errorf("Expected at least 2 resources, got %d", len(resources))
+	}
+
+	// Warning must be captured
+	if len(diagnostics) < 1 {
+		t.Error("Expected at least 1 diagnostic (warning)")
+	}
+
+	// Log lines must capture non-resource, non-diagnostic text
+	if len(logs) == 0 {
+		t.Error("Expected log lines for plan header text")
+	}
+
+	// Verify specific critical content
+	allOutput := extractAllOutput(diagnostics, logs, resources)
+	criticalContent := []string{
+		"google_compute_instance.web",
+		"aws_s3_bucket.logs",
+		"Deprecated attribute",
+		"Plan: 2 to add",
+	}
+	for _, content := range criticalContent {
+		if !strings.Contains(allOutput, content) {
+			t.Errorf("ZERO-LOSS VIOLATION: critical content missing: %q", content)
+		}
+	}
+}
