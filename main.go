@@ -133,6 +133,7 @@ type exitCodeMsg struct {
 	hasError bool
 }
 
+// exitCodeMsg carries the exit code when terraform command completes
 // Model holds the application state for the Bubble Tea framework
 type Model struct {
 	// Data
@@ -562,32 +563,32 @@ func (m *Model) rebuildLines() {
 
 	if m.showLogs {
 		// LOG view: show all output including logs and diagnostics
-		// First show diagnostics (errors/warnings) so they're visible
+		// First show diagnostics (errors/warnings) with full formatting
 		for i, diag := range m.diagnostics {
-			// Format diagnostic as log lines with proper prefix
-			severityPrefix := "Error: "
-			if diag.Severity == "warning" {
-				severityPrefix = "Warning: "
-			}
-
-			// Add the summary line
-			wrappedSummary := wrapText(severityPrefix+diag.Summary, m.width-2, 0)
-			for _, w := range wrappedSummary {
+			// Wrap summary (accounting for 4 chars prefix: "▸ ✗ ")
+			wrappedSummary := wrapText(diag.Summary, m.width-4, 0)
+			for wIdx, summaryLine := range wrappedSummary {
 				m.lines = append(m.lines, Line{
-					Type:    LineTypeLog,
-					Content: w,
-					AttrIdx: i,
+					Type:        LineTypeDiagnostic,
+					DiagIdx:     i,
+					ResourceIdx: -1,
+					AttrIdx:     wIdx,
+					Content:     summaryLine,
 				})
 			}
 
-			// Add detail lines
-			for _, detail := range diag.Detail {
-				wrapped := wrapText(detail.Content, m.width-2, 0)
+			// Add detail lines with proper diagnostic detail formatting
+			// This preserves guide colors (│, ├, ─, ╵) and underline markers (^, ~)
+			for j, detail := range diag.Detail {
+				// Wrap diagnostic details (accounting for 4 spaces padding in render)
+				wrapped := wrapText(detail.Content, m.width-4, 0)
 				for _, w := range wrapped {
 					m.lines = append(m.lines, Line{
-						Type:    LineTypeLog,
-						Content: w,
-						AttrIdx: i,
+						Type:        LineTypeDiagnosticDetail,
+						DiagIdx:     i,
+						ResourceIdx: -1,
+						AttrIdx:     j,
+						Content:     w,
 					})
 				}
 			}

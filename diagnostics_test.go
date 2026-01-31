@@ -61,7 +61,8 @@ func TestLongDiagnosticMessage(t *testing.T) {
 func TestDiagnosticSummaryWrapping(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI)
 	m := &Model{
-		width: 20,
+		width:    20,
+		showLogs: true, // Diagnostics are now shown in LOG view only
 		diagnostics: []Diagnostic{
 			{
 				Severity: "error",
@@ -75,6 +76,11 @@ func TestDiagnosticSummaryWrapping(t *testing.T) {
 
 	if len(m.lines) == 1 {
 		t.Error("Diagnostic summary was not wrapped")
+	}
+
+	// Verify the line is a diagnostic type (not log type)
+	if len(m.lines) > 0 && m.lines[0].Type != LineTypeDiagnostic {
+		t.Errorf("Expected LineTypeDiagnostic, got %v", m.lines[0].Type)
 	}
 }
 
@@ -136,5 +142,82 @@ func TestRealWorldDiagnosticParsing(t *testing.T) {
 	}
 	if !foundOnLine {
 		t.Error("expected to find 'on reproduce_long_error.tf' line")
+	}
+}
+
+// TestDiagnosticsInLogViewNotPlanView verifies that diagnostics are rendered
+// in LOG view (showLogs=true) but NOT in PLAN view (showLogs=false)
+func TestDiagnosticsInLogViewNotPlanView(t *testing.T) {
+	testCases := []struct {
+		name            string
+		showLogs        bool
+		expectDiags     bool
+		expectResources bool
+	}{
+		{
+			name:            "LOG view shows diagnostics",
+			showLogs:        true,
+			expectDiags:     true,
+			expectResources: false,
+		},
+		{
+			name:            "PLAN view shows only resources",
+			showLogs:        false,
+			expectDiags:     false,
+			expectResources: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Model{
+				renderingMode: RenderingModeDashboard,
+				showLogs:      tc.showLogs,
+				width:         80,
+				diagnostics: []Diagnostic{
+					{
+						Severity: "error",
+						Summary:  "Test error",
+						Detail:   []DiagnosticLine{{Content: "detail line"}},
+						Expanded: true,
+					},
+				},
+				resources: []ResourceChange{
+					{
+						Address:    "test_resource",
+						Action:     "create",
+						ActionText: "will be created",
+						Attributes: []string{},
+					},
+				},
+			}
+
+			m.rebuildLines()
+
+			hasDiagnosticLines := false
+			hasResourceLines := false
+
+			for _, line := range m.lines {
+				if line.Type == LineTypeDiagnostic || line.Type == LineTypeDiagnosticDetail {
+					hasDiagnosticLines = true
+				}
+				if line.Type == LineTypeResource {
+					hasResourceLines = true
+				}
+			}
+
+			if tc.expectDiags && !hasDiagnosticLines {
+				t.Error("Expected diagnostic lines in view, but none found")
+			}
+			if !tc.expectDiags && hasDiagnosticLines {
+				t.Error("Expected NO diagnostic lines in view, but found some")
+			}
+			if tc.expectResources && !hasResourceLines {
+				t.Error("Expected resource lines in view, but none found")
+			}
+			if !tc.expectResources && hasResourceLines {
+				t.Error("Expected NO resource lines in view, but found some")
+			}
+		})
 	}
 }

@@ -28,42 +28,61 @@ func TestRichFormattingRendering(t *testing.T) {
 	}
 	m.rebuildLines()
 
-	// Check that diagnostic is rendered as log line
-	// Line 0 should be the error summary
+	// Check that diagnostic is rendered with proper formatting in LOG view
+	// Line 0 should be the error summary (LineTypeDiagnostic)
 	if len(m.lines) == 0 {
 		t.Fatal("Expected lines to be rendered")
 	}
 
-	header := m.renderLogLine(m.lines[0].Content, false)
+	// Verify line types are correct
+	if m.lines[0].Type != LineTypeDiagnostic {
+		t.Errorf("Expected LineTypeDiagnostic, got %v", m.lines[0].Type)
+	}
+
+	header := m.renderDiagnosticLine(m.lines[0], false)
 	// Should contain "Error:"
 	if !strings.Contains(header, "Error:") {
 		t.Error("Header should contain 'Error:'")
 	}
-	// Check for ANSI styling (Error: lines get styled)
+	// Should contain ✗ symbol
+	if !strings.Contains(header, "✗") {
+		t.Error("Header should contain ✗ symbol")
+	}
+	// Check for ANSI styling
 	if !strings.Contains(header, "\x1b[") {
 		t.Error("Error header should contain ANSI styling codes")
 	}
 
-	// Check Marker line (line 1)
+	// Check Marker line (line 1) - LineTypeDiagnosticDetail
 	if len(m.lines) < 2 {
 		t.Fatal("Expected at least 2 lines")
 	}
-	markerLine := m.renderLogLine(m.lines[1].Content, false)
+	if m.lines[1].Type != LineTypeDiagnosticDetail {
+		t.Errorf("Expected LineTypeDiagnosticDetail, got %v", m.lines[1].Type)
+	}
+	markerLine := m.renderDiagnosticDetailLine(m.lines[1], false)
 	// Should contain the marker text
 	if !strings.Contains(markerLine, "on main.tf line 1:") {
 		t.Error("Marker line should contain 'on main.tf line 1:'")
 	}
+	// Check for ANSI (guide characters should be colored)
+	if !strings.Contains(markerLine, "\x1b[") {
+		t.Error("Marker line should contain ANSI codes for guide styling")
+	}
 
-	// Check Underline line (line 2)
+	// Check Underline line (line 2) - LineTypeDiagnosticDetail
 	if len(m.lines) < 3 {
 		t.Fatal("Expected at least 3 lines")
 	}
-	underlineLine := m.renderLogLine(m.lines[2].Content, false)
+	if m.lines[2].Type != LineTypeDiagnosticDetail {
+		t.Errorf("Expected LineTypeDiagnosticDetail, got %v", m.lines[2].Type)
+	}
+	underlineLine := m.renderDiagnosticDetailLine(m.lines[2], false)
 	// Should contain ^
 	if !strings.Contains(underlineLine, "^") {
 		t.Error("Underline line should contain ^")
 	}
-	// Check for ANSI codes (renderLogLine applies styling)
+	// Check for ANSI codes (underline should be styled)
 	if !strings.Contains(underlineLine, "\x1b[") {
 		t.Error("Underline line should contain ANSI codes")
 	}
