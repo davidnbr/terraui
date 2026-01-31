@@ -914,8 +914,15 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyEnter:
 		payload := m.userInput + "\n"
-		if _, err := m.ptyFile.Write([]byte(payload)); err != nil {
-			// PTY write failed - could set error state here
+		if m.ptyFile != nil {
+			if _, err := m.ptyFile.Write([]byte(payload)); err != nil {
+				// PTY write failed - log to stderr for debugging
+				fmt.Fprintf(os.Stderr, "[ERROR] Failed to write to PTY: %v\n", err)
+			} else {
+				// Debug: log successful write
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[ERROR] PTY file is nil, cannot write input\n")
 		}
 		m.userInput = ""
 		m.prompt = ""
@@ -923,6 +930,7 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showLogs = true
 		m.autoScroll = true
 		m.rebuildLines()
+		m.needsSync = true // Force TUI to redraw with new logs
 	}
 
 	return m, nil
