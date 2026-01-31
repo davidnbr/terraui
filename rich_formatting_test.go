@@ -13,6 +13,7 @@ func TestRichFormattingRendering(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI)
 
 	m := &Model{renderingMode: RenderingModeDashboard,
+		showLogs: true, // Diagnostics are now shown in LOG view only
 		diagnostics: []Diagnostic{
 			{
 				Severity: "error",
@@ -27,33 +28,43 @@ func TestRichFormattingRendering(t *testing.T) {
 	}
 	m.rebuildLines()
 
-	// Check Header (Error: ...)
-	// Line 0 is header.
-	header := m.renderDiagnosticLine(m.lines[0], false)
+	// Check that diagnostic is rendered as log line
+	// Line 0 should be the error summary
+	if len(m.lines) == 0 {
+		t.Fatal("Expected lines to be rendered")
+	}
+
+	header := m.renderLogLine(m.lines[0].Content, false)
 	// Should contain "Error:"
 	if !strings.Contains(header, "Error:") {
 		t.Error("Header should contain 'Error:'")
 	}
-
-	// Check Marker (Bold)
-	// Line 1 is detail 0.
-	markerLine := m.renderDiagnosticDetailLine(m.lines[1], false)
-	// Should contain bold sequence? Lipgloss bold is usually "\x1b[1m"
-	// Or check if it's NOT just plain text.
-	if markerLine == "    "+m.lines[1].Content {
-		t.Error("Marker line should be styled (bold)")
+	// Check for ANSI styling (Error: lines get styled)
+	if !strings.Contains(header, "\x1b[") {
+		t.Error("Error header should contain ANSI styling codes")
 	}
 
-	// Check Underline (^)
-	// Line 2 is detail 1.
-	underlineLine := m.renderDiagnosticDetailLine(m.lines[2], false)
-	// Should contain colored ^.
-	// Since we replace ^ with styled ^, output should be longer/different.
+	// Check Marker line (line 1)
+	if len(m.lines) < 2 {
+		t.Fatal("Expected at least 2 lines")
+	}
+	markerLine := m.renderLogLine(m.lines[1].Content, false)
+	// Should contain the marker text
+	if !strings.Contains(markerLine, "on main.tf line 1:") {
+		t.Error("Marker line should contain 'on main.tf line 1:'")
+	}
+
+	// Check Underline line (line 2)
+	if len(m.lines) < 3 {
+		t.Fatal("Expected at least 3 lines")
+	}
+	underlineLine := m.renderLogLine(m.lines[2].Content, false)
+	// Should contain ^
 	if !strings.Contains(underlineLine, "^") {
 		t.Error("Underline line should contain ^")
 	}
-	// Check for ANSI
-	if !strings.Contains(underlineLine, "\x1b") {
+	// Check for ANSI codes (renderLogLine applies styling)
+	if !strings.Contains(underlineLine, "\x1b[") {
 		t.Error("Underline line should contain ANSI codes")
 	}
 }
