@@ -13,10 +13,10 @@ func TestPlanViewTimingGap_ErrorSwitchesToLogView(t *testing.T) {
 	// 1. Receive a resource -> should switch to PLAN view
 	res := ResourceChange{Address: "aws_instance.foo", Action: "create"}
 	msg1 := StreamMsg{Resource: &res}
-	
+
 	// We need to call Update directly as the goroutine loop is not running in this unit test setup
 	// exactly like the app would.
-	
+
 	updatedModel, _ := m.Update(msg1)
 	m = updatedModel.(Model)
 

@@ -117,9 +117,9 @@ type Line struct {
 
 // StreamMsg carries parsed content from the input stream to the UI
 type StreamMsg struct {
-	Resource   *ResourceChange
-	Diagnostic *Diagnostic
-	LogLine    *string
+	Resource        *ResourceChange
+	Diagnostic      *Diagnostic
+	LogLine         *string
 	Prompt          *string // Partial line that looks like a prompt (no trailing newline)
 	Done            bool    // Signals end of input stream
 	ReceivedContent bool    // True if any non-empty content was received (only meaningful with Done)

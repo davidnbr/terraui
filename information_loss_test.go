@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-
 // =============================================================================
 // Bug 1: Diagnostic blocks without Error:/Warning: prefix are silently dropped
 // =============================================================================
@@ -470,8 +469,8 @@ func TestEmptyInputDetection_WithContent(t *testing.T) {
 func TestEmptyInputDetection_PTYMode(t *testing.T) {
 	// PTY mode (ptyFile != nil): warning should NOT appear even with no content
 	m := Model{
-		streamChan:      make(chan StreamMsg, 10),
-		ptyFile:         os.Stderr, // Non-nil signals PTY mode
+		streamChan: make(chan StreamMsg, 10),
+		ptyFile:    os.Stderr, // Non-nil signals PTY mode
 	}
 
 	result, _ := m.Update(StreamMsg{Done: true})
