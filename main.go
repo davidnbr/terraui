@@ -51,9 +51,10 @@ const (
 
 // Theme holds the styles for a rendering mode
 type Theme struct {
-	HeaderPlan lipgloss.Style
-	HeaderLog  lipgloss.Style
-	InputMode  lipgloss.Style
+	HeaderPlan  lipgloss.Style
+	HeaderLog   lipgloss.Style
+	HeaderError lipgloss.Style // Red header for error state
+	InputMode   lipgloss.Style
 
 	Create  lipgloss.Style
 	Update  lipgloss.Style
@@ -116,15 +117,22 @@ type Line struct {
 
 // StreamMsg carries parsed content from the input stream to the UI
 type StreamMsg struct {
-	Resource   *ResourceChange
-	Diagnostic *Diagnostic
-	LogLine    *string
-	Prompt     *string // Partial line that looks like a prompt (no trailing newline)
-	Done       bool    // Signals end of input stream
+	Resource        *ResourceChange
+	Diagnostic      *Diagnostic
+	LogLine         *string
+	Prompt          *string // Partial line that looks like a prompt (no trailing newline)
+	Done            bool    // Signals end of input stream
+	ReceivedContent bool    // True if any non-empty content was received (only meaningful with Done)
 }
 
 // tickMsg triggers periodic UI updates for batched rendering
 type tickMsg time.Time
+
+// exitCodeMsg carries the exit code when terraform command completes
+type exitCodeMsg struct {
+	exitCode int
+	hasError bool
+}
 
 // Model holds the application state for the Bubble Tea framework
 type Model struct {
@@ -158,6 +166,10 @@ type Model struct {
 
 	// Cached theme to avoid repeated allocations during rendering
 	cachedTheme *Theme
+
+	// Exit code tracking for error detection
+	exitCode int  // Exit code from terraform command (0 = success)
+	hasError bool // True if exitCode != 0, indicates execution failure
 }
 
 func (m *Model) theme() Theme {
@@ -180,9 +192,10 @@ func createGuideReplacer(style lipgloss.Style) *strings.Replacer {
 func getTheme(mode RenderingMode) Theme {
 	if mode == RenderingModeHighContrast {
 		t := Theme{
-			HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1),
-			HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1),
-			InputMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1),
+			HeaderPlan:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1),
+			HeaderLog:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1),
+			HeaderError: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#ff5555")).Padding(0, 1),
+			InputMode:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1),
 
 			Create:  lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true),
 			Update:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true),
@@ -212,9 +225,10 @@ func getTheme(mode RenderingMode) Theme {
 
 	// Dashboard mode (mimics standard Terraform colors but with Catppuccin palette)
 	t := Theme{
-		HeaderPlan: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1),
-		HeaderLog:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1),
-		InputMode:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1),
+		HeaderPlan:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#89b4fa")).Padding(0, 1),
+		HeaderLog:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#cba6f7")).Padding(0, 1),
+		HeaderError: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#ff5555")).Padding(0, 1),
+		InputMode:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e3a1")).Padding(0, 1),
 
 		Create:  lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Bold(true), // Green
 		Update:  lipgloss.NewStyle().Foreground(lipgloss.Color("#f9e2af")).Bold(true), // Yellow
@@ -245,8 +259,8 @@ func getTheme(mode RenderingMode) Theme {
 // Pre-compiled regex patterns for parsing
 var (
 	headerPattern    = regexp.MustCompile(`^\s*# (.+?) (will be created|will be destroyed|will be updated in-place|must be replaced|will be imported)`)
-	errorPattern     = regexp.MustCompile(`Error:\s*(.+)`)
-	warningPattern   = regexp.MustCompile(`Warning:\s*(.+)`)
+	errorPattern     = regexp.MustCompile(`^\s*Error:\s*(.+)`)
+	warningPattern   = regexp.MustCompile(`^\s*Warning:\s*(.+)`)
 	promptPattern    = regexp.MustCompile(`Enter a value:\s*$`)
 	markerPattern    = regexp.MustCompile(`^\s*on\s+.+\s+line\s+\d+`)
 	underlinePattern = regexp.MustCompile(`^\s*[\^~]+`)
@@ -285,13 +299,43 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 	inResource := false
 	inDiagnostic := false
 	bracketDepth := 0
+	receivedContent := false
 
 	processLine := func(rawLine string) {
 		cleanLine := stripANSI(rawLine)
 		richLine := sanitizeTerraformANSI(rawLine)
 
+		// Track that we received meaningful content
+		if strings.TrimSpace(cleanLine) != "" {
+			receivedContent = true
+		}
+
 		// Diagnostic block handling
 		if strings.HasPrefix(cleanLine, "╷") {
+			// If we're already in a diagnostic block, process the previous one
+			// before starting a new one (handles missing ╵ between blocks)
+			if inDiagnostic && len(diagLines) > 0 {
+				diag := parseDiagnosticBlock(diagLines)
+				if diag != nil {
+					select {
+					case m.streamChan <- StreamMsg{Diagnostic: diag}:
+					case <-ctx.Done():
+						return
+					}
+				} else {
+					// Fallback: preserve unrecognized content as log lines
+					for _, line := range diagLines {
+						if strings.TrimSpace(stripANSI(line)) != "" {
+							l := stripANSI(line)
+							select {
+							case m.streamChan <- StreamMsg{LogLine: &l}:
+							case <-ctx.Done():
+								return
+							}
+						}
+					}
+				}
+			}
 			inDiagnostic = true
 			diagLines = make([]string, 0)
 			return
@@ -305,6 +349,19 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 					case <-ctx.Done():
 						return
 					}
+				} else {
+					// Fallback: if diagnostic parsing fails, preserve lines as log entries
+					// This ensures NO information is lost, even for unrecognized formats
+					for _, line := range diagLines {
+						if strings.TrimSpace(stripANSI(line)) != "" {
+							l := stripANSI(line)
+							select {
+							case m.streamChan <- StreamMsg{LogLine: &l}:
+							case <-ctx.Done():
+								return
+							}
+						}
+					}
 				}
 			}
 			diagLines = nil
@@ -312,7 +369,16 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 			return
 		}
 		if inDiagnostic {
-			richLineContent := strings.TrimPrefix(richLine, "│")
+			// Use cleanLine (fully stripped) to detect │ prefix, then strip from
+			// richLine at the same position. This handles cases where ANSI
+			// formatting codes (bold/underline) precede the │ character.
+			richLineContent := richLine
+			if strings.HasPrefix(cleanLine, "│") {
+				// Find │ in richLine and strip everything up to and including it
+				if idx := strings.Index(richLine, "│"); idx >= 0 {
+					richLineContent = richLine[idx+len("│"):]
+				}
+			}
 			diagLines = append(diagLines, richLineContent)
 			return
 		}
@@ -422,6 +488,34 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 		}
 	}
 
+	// Flush any remaining content in line buffer (last line without trailing newline)
+	if strings.TrimSpace(lineBuffer) != "" {
+		processLine(lineBuffer)
+		lineBuffer = ""
+	}
+
+	// Flush any pending diagnostic block (stream ended without closing ╵)
+	if inDiagnostic && len(diagLines) > 0 {
+		diag := parseDiagnosticBlock(diagLines)
+		if diag != nil {
+			select {
+			case m.streamChan <- StreamMsg{Diagnostic: diag}:
+			case <-ctx.Done():
+			}
+		} else {
+			// Fallback: preserve unrecognized diagnostic content as log lines
+			for _, line := range diagLines {
+				if strings.TrimSpace(stripANSI(line)) != "" {
+					l := stripANSI(line)
+					select {
+					case m.streamChan <- StreamMsg{LogLine: &l}:
+					case <-ctx.Done():
+					}
+				}
+			}
+		}
+	}
+
 	// Flush any remaining resource
 	if currentResource != nil {
 		res := *currentResource
@@ -432,7 +526,7 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 	}
 
 	select {
-	case m.streamChan <- StreamMsg{Done: true}:
+	case m.streamChan <- StreamMsg{Done: true, ReceivedContent: receivedContent}:
 	case <-ctx.Done():
 	}
 }
@@ -472,6 +566,8 @@ func (m *Model) rebuildLines() {
 	m.lines = nil
 
 	if m.showLogs {
+		// LOG view: show all output including logs and diagnostics
+		// First show regular logs (terraform output in chronological order)
 		for i, log := range m.logs {
 			// Wrap log lines
 			// renderLogLine adds 2 spaces padding/cursor
@@ -485,24 +581,24 @@ func (m *Model) rebuildLines() {
 				})
 			}
 		}
-		return
-	}
 
-	// Plan view: diagnostics first, then resources
-	for i, diag := range m.diagnostics {
-		// Wrap summary (accounting for 4 chars prefix: "▸ ✗ ")
-		wrappedSummary := wrapText(diag.Summary, m.width-4, 0)
-		for wIdx, summaryLine := range wrappedSummary {
-			m.lines = append(m.lines, Line{
-				Type:        LineTypeDiagnostic,
-				DiagIdx:     i,
-				ResourceIdx: -1,
-				AttrIdx:     wIdx,
-				Content:     summaryLine,
-			})
-		}
+		// Then show diagnostics (errors/warnings) at the end where they're most visible
+		// This ensures errors appear after the normal terraform output
+		for i, diag := range m.diagnostics {
+			// Wrap summary (accounting for 4 chars prefix: "▸ ✗ ")
+			wrappedSummary := wrapText(diag.Summary, m.width-4, 0)
+			for wIdx, summaryLine := range wrappedSummary {
+				m.lines = append(m.lines, Line{
+					Type:        LineTypeDiagnostic,
+					DiagIdx:     i,
+					ResourceIdx: -1,
+					AttrIdx:     wIdx,
+					Content:     summaryLine,
+				})
+			}
 
-		if diag.Expanded {
+			// Add detail lines with proper diagnostic detail formatting
+			// This preserves guide colors (│, ├, ─, ╵) and underline markers (^, ~)
 			for j, detail := range diag.Detail {
 				// Wrap diagnostic details (accounting for 4 spaces padding in render)
 				wrapped := wrapText(detail.Content, m.width-4, 0)
@@ -517,7 +613,12 @@ func (m *Model) rebuildLines() {
 				}
 			}
 		}
+		return
 	}
+
+	// Plan view: show resources only, NOT diagnostics
+	// When there's an error, diagnostics are shown in LOG tab only
+	// This ensures clear separation: PLAN = resource changes, LOG = errors/output
 
 	for i, rc := range m.resources {
 		m.lines = append(m.lines, Line{
@@ -615,16 +716,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StreamMsg:
 		if msg.Done {
 			m.done = true
+			// Check if we're in pipe mode (no PTY) and received no content
+			// This indicates the user likely forgot to redirect stderr (2>&1)
+			if m.ptyFile == nil && !msg.ReceivedContent {
+				warning := Diagnostic{
+					Severity: "warning",
+					Summary:  "No input received from Terraform - errors may have been sent to stderr",
+					Detail: []DiagnosticLine{
+						{Content: "Terraform sends error messages to stderr, not stdout."},
+						{Content: "When piping Terraform output to terraui, use: terraform plan 2>&1 | terraui"},
+						{Content: "Or use interactive mode: terraui terraform plan"},
+					},
+					Expanded: true,
+				}
+				m.diagnostics = append(m.diagnostics, warning)
+			}
 			m.needsSync = true
 			return m, nil
 		}
 		if msg.Resource != nil {
 			m.resources = append(m.resources, *msg.Resource)
-			m.showLogs = false
+			// Only auto-switch to PLAN if no error diagnostics have arrived.
+			// Once errors are present, stay in LOG so they remain visible.
+			hasErrors := false
+			for _, d := range m.diagnostics {
+				if d.Severity == "error" {
+					hasErrors = true
+					break
+				}
+			}
+			if !hasErrors {
+				m.showLogs = false
+			}
 			m.needsSync = true
 		}
 		if msg.Diagnostic != nil {
 			m.diagnostics = append(m.diagnostics, *msg.Diagnostic)
+			// Fix timing gap: if an error occurs, switch to LOG view immediately
+			// so the user sees it, rather than waiting for exit code.
+			if msg.Diagnostic.Severity == "error" {
+				m.showLogs = true
+			}
 			m.needsSync = true
 		}
 		if msg.LogLine != nil {
@@ -636,6 +768,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.needsSync = true
 		}
 		return m, m.waitForStreamMsg()
+
+	case exitCodeMsg:
+		m.exitCode = msg.exitCode
+		m.hasError = msg.hasError
+		// Auto-switch to LOG view when there's an error
+		if m.hasError {
+			m.showLogs = true
+		}
+		m.needsSync = true
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -792,8 +934,13 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyEnter:
 		payload := m.userInput + "\n"
-		if _, err := m.ptyFile.Write([]byte(payload)); err != nil {
-			// PTY write failed - could set error state here
+		if m.ptyFile != nil {
+			if _, err := m.ptyFile.Write([]byte(payload)); err != nil {
+				// PTY write failed - log to stderr for debugging
+				fmt.Fprintf(os.Stderr, "[ERROR] Failed to write to PTY: %v\n", err)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "[ERROR] PTY file is nil, cannot write input\n")
 		}
 		m.userInput = ""
 		m.prompt = ""
@@ -801,6 +948,7 @@ func (m Model) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showLogs = true
 		m.autoScroll = true
 		m.rebuildLines()
+		m.needsSync = true // Force TUI to redraw with new logs
 	}
 
 	return m, nil
@@ -910,7 +1058,12 @@ func (m Model) renderHeader() string {
 	if m.inputMode {
 		header = t.InputMode.Render("INPUT") + " " + t.Dim.Render("Interactive Mode")
 	} else if m.showLogs {
-		header = t.HeaderLog.Render("LOGS") + " " + t.Dim.Render("Terraform Output")
+		// Show LOGS (ERROR) in red when there's an error
+		if m.hasError {
+			header = t.HeaderError.Render("LOGS (ERROR)") + " " + t.Dim.Render(fmt.Sprintf("Exit Code: %d", m.exitCode))
+		} else {
+			header = t.HeaderLog.Render("LOGS") + " " + t.Dim.Render("Terraform Output")
+		}
 	} else {
 		header = t.HeaderPlan.Render("PLAN") + " " + t.Dim.Render("Terraform Viewer")
 	}
@@ -1489,8 +1642,9 @@ func parseDiagnosticBlock(richLines []string) *Diagnostic {
 
 	var severity, summary string
 	var details []DiagnosticLine
+	var preSeverityLines []DiagnosticLine // Lines before Error:/Warning: header
 
-	for i, richLine := range richLines {
+	for _, richLine := range richLines {
 		// Clean text for regex matching and empty line detection
 		cleanLine := stripANSI(richLine)
 		trimmed := strings.TrimSpace(cleanLine)
@@ -1530,12 +1684,48 @@ func parseDiagnosticBlock(richLines []string) *Diagnostic {
 			continue
 		}
 
-		if severity != "" && i > 0 {
+		if severity != "" {
 			details = append(details, DiagnosticLine{Content: richLineContent, IsMarker: markerPattern.MatchString(trimmed)})
+		} else {
+			// Lines before severity header - preserved and prepended to details
+			preSeverityLines = append(preSeverityLines, DiagnosticLine{Content: richLineContent, IsMarker: markerPattern.MatchString(trimmed)})
 		}
 	}
+
+	// Prepend any lines that appeared before the Error:/Warning: header
+	if severity != "" && len(preSeverityLines) > 0 {
+		details = append(preSeverityLines, details...)
+	}
+	// Fallback: if no Error:/Warning: prefix was found, preserve the content
+	// as an error diagnostic so no information is lost. Diagnostic blocks (╷...╵)
+	// always indicate problems that the user needs to see.
 	if severity == "" || summary == "" {
-		return nil
+		var nonEmptyLines []string
+		for _, rl := range richLines {
+			clean := stripANSI(rl)
+			trimmed := strings.TrimSpace(clean)
+			if trimmed != "" {
+				content := rl
+				if strings.HasPrefix(content, " ") {
+					content = content[1:]
+				}
+				nonEmptyLines = append(nonEmptyLines, content)
+			}
+		}
+		if len(nonEmptyLines) == 0 {
+			return nil
+		}
+		// Use first non-empty line as summary, rest as details
+		summary = stripANSI(nonEmptyLines[0])
+		severity = "error"
+		details = nil
+		for _, line := range nonEmptyLines[1:] {
+			clean := stripANSI(line)
+			details = append(details, DiagnosticLine{
+				Content:  line,
+				IsMarker: markerPattern.MatchString(strings.TrimSpace(clean)),
+			})
+		}
 	}
 
 	return &Diagnostic{
@@ -1568,32 +1758,54 @@ func main() {
 		renderingMode: RenderingModeDashboard,
 		ptyFile:       ptyFile,
 		streamChan:    make(chan StreamMsg, streamBufferSize),
+		exitCode:      -1, // -1 means not yet set
 	}
 
 	// Handle signals for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Cleanup function for PTY and process
+	// exitChan carries the exit code; cmdDone is closed when cmd.Wait() returns.
+	// Only the Wait goroutine calls cmd.Wait() to avoid double-wait issues.
+	exitChan := make(chan int, 1)
+	cmdDone := make(chan struct{})
+
+	// Start the sole goroutine that waits for command completion
+	if cmd != nil {
+		go func() {
+			defer close(cmdDone)
+			err := cmd.Wait()
+			var exitCode int
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					exitCode = exitErr.ExitCode()
+				} else {
+					exitCode = 1
+				}
+			}
+			exitChan <- exitCode
+		}()
+	} else {
+		close(cmdDone)
+		go func() {
+			exitChan <- 0
+		}()
+	}
+
+	// Cleanup function for PTY and process signaling.
+	// Does NOT call cmd.Wait() -- the Wait goroutine above is the sole waiter.
 	cleanup := func() {
 		if ptyFile != nil {
 			ptyFile.Close()
 		}
 		if cmd != nil && cmd.Process != nil {
-			// Try graceful shutdown first
 			cmd.Process.Signal(syscall.SIGTERM)
-
-			// Wait with timeout
-			done := make(chan error, 1)
-			go func() { done <- cmd.Wait() }()
-
 			select {
-			case <-done:
-				// Process exited cleanly
+			case <-cmdDone:
+				// Process exited gracefully
 			case <-time.After(processShutdownTimeout):
-				// Force kill if still running
 				cmd.Process.Kill()
-				<-done
+				<-cmdDone
 			}
 		}
 	}
@@ -1605,10 +1817,16 @@ func main() {
 		os.Exit(0)
 	}()
 
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+
+	// Goroutine to send exit code to model once available
+	go func() {
+		exitCode := <-exitChan
+		p.Send(exitCodeMsg{exitCode: exitCode, hasError: exitCode != 0})
+	}()
+
 	// Ensure cleanup on normal exit
 	defer cleanup()
-
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
