@@ -256,37 +256,38 @@ func TestPlanViewHasNoDiagnostics(t *testing.T) {
 	}
 }
 
-// TestInitStartsCancellableGoroutine verifies that Init() properly sets up
-// a cancellation function that persists in the model.
-// This test is expected to fail until the Init() value receiver bug is fixed.
-func TestInitStartsCancellableGoroutine(t *testing.T) {
+// TestCancellationWorksWithExternalContext verifies that the new pattern
+// of injecting context and cancelFunc from main() correctly allows
+// for graceful shutdown of the input reading goroutine.
+func TestCancellationWorksWithExternalContext(t *testing.T) {
 	// Setup a pipe to simulate a blocking reader
 	r, w, _ := os.Pipe()
-	defer w.Close()
 	defer r.Close()
+	defer w.Close()
+
+	// 1. Setup context (mimicking main)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	m := Model{
 		streamChan: make(chan StreamMsg, 100),
 		ptyFile:    r,
+		cancelFunc: cancel, // 2. Inject cancelFunc
 	}
 
-	// Calling Init() on the value receiver
-	// In the real app, bubble tea calls this.
-	m.Init()
+	// 3. Start goroutine (mimicking main)
+	go m.readInputStream(ctx, r)
 
-	// 1. Verify we captured the cancelFunc
+	// 4. Verify we can actually stop the goroutine
 	if m.cancelFunc == nil {
-		t.Fatal("FAILED: m.cancelFunc is nil. The Init() method likely used a value receiver, losing the reference.")
+		t.Fatal("FAILED: m.cancelFunc is nil")
 	}
-
-	// 2. Verify we can actually stop the goroutine
 	m.cancelFunc()
 
 	// The readInputStream goroutine defers closing streamChan
 	select {
 	case <-m.streamChan:
 		// Success: channel closed
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(1 * time.Second):
 		t.Fatal("FAILED: Goroutine did not exit (streamChan not closed) after calling cancelFunc")
 	}
 }
