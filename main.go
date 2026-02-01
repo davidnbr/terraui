@@ -271,16 +271,6 @@ var (
 
 // Init implements tea.Model. Starts input reading and periodic ticks.
 func (m Model) Init() tea.Cmd {
-	var reader io.Reader = os.Stdin
-	if m.ptyFile != nil {
-		reader = m.ptyFile
-	}
-
-	// Start the input reading goroutine
-	ctx, cancel := context.WithCancel(context.Background())
-	m.cancelFunc = cancel
-	go m.readInputStream(ctx, reader)
-
 	return tea.Batch(
 		m.waitForStreamMsg(),
 		tickCmd(),
@@ -1751,6 +1741,9 @@ func main() {
 		}
 	}
 
+	// Create context for cancellation
+	ctx, cancel := context.WithCancel(context.Background())
+
 	// Create model with buffered channel
 	m := Model{
 		showLogs:      true,
@@ -1759,7 +1752,15 @@ func main() {
 		ptyFile:       ptyFile,
 		streamChan:    make(chan StreamMsg, streamBufferSize),
 		exitCode:      -1, // -1 means not yet set
+		cancelFunc:    cancel,
 	}
+
+	// Start the input reading goroutine
+	var reader io.Reader = os.Stdin
+	if m.ptyFile != nil {
+		reader = m.ptyFile
+	}
+	go m.readInputStream(ctx, reader)
 
 	// Handle signals for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -1795,6 +1796,7 @@ func main() {
 	// Cleanup function for PTY and process signaling.
 	// Does NOT call cmd.Wait() -- the Wait goroutine above is the sole waiter.
 	cleanup := func() {
+		cancel()
 		if ptyFile != nil {
 			ptyFile.Close()
 		}

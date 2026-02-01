@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -252,5 +253,41 @@ func TestPlanViewHasNoDiagnostics(t *testing.T) {
 		if line.Type == LineTypeDiagnostic || line.Type == LineTypeDiagnosticDetail {
 			t.Error("PLAN view should NOT have diagnostic lines")
 		}
+	}
+}
+
+// TestCancellationWorksWithExternalContext verifies that the new pattern
+// of injecting context and cancelFunc from main() correctly allows
+// for graceful shutdown of the input reading goroutine.
+func TestCancellationWorksWithExternalContext(t *testing.T) {
+	// Setup a pipe to simulate a blocking reader
+	r, w, _ := os.Pipe()
+	defer r.Close()
+	defer w.Close()
+
+	// 1. Setup context (mimicking main)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	m := Model{
+		streamChan: make(chan StreamMsg, 100),
+		ptyFile:    r,
+		cancelFunc: cancel, // 2. Inject cancelFunc
+	}
+
+	// 3. Start goroutine (mimicking main)
+	go m.readInputStream(ctx, r)
+
+	// 4. Verify we can actually stop the goroutine
+	if m.cancelFunc == nil {
+		t.Fatal("FAILED: m.cancelFunc is nil")
+	}
+	m.cancelFunc()
+
+	// The readInputStream goroutine defers closing streamChan
+	select {
+	case <-m.streamChan:
+		// Success: channel closed
+	case <-time.After(1 * time.Second):
+		t.Fatal("FAILED: Goroutine did not exit (streamChan not closed) after calling cancelFunc")
 	}
 }
