@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -252,5 +253,40 @@ func TestPlanViewHasNoDiagnostics(t *testing.T) {
 		if line.Type == LineTypeDiagnostic || line.Type == LineTypeDiagnosticDetail {
 			t.Error("PLAN view should NOT have diagnostic lines")
 		}
+	}
+}
+
+// TestInitStartsCancellableGoroutine verifies that Init() properly sets up
+// a cancellation function that persists in the model.
+// This test is expected to fail until the Init() value receiver bug is fixed.
+func TestInitStartsCancellableGoroutine(t *testing.T) {
+	// Setup a pipe to simulate a blocking reader
+	r, w, _ := os.Pipe()
+	defer w.Close()
+	defer r.Close()
+
+	m := Model{
+		streamChan: make(chan StreamMsg, 100),
+		ptyFile:    r,
+	}
+
+	// Calling Init() on the value receiver
+	// In the real app, bubble tea calls this.
+	m.Init()
+
+	// 1. Verify we captured the cancelFunc
+	if m.cancelFunc == nil {
+		t.Fatal("FAILED: m.cancelFunc is nil. The Init() method likely used a value receiver, losing the reference.")
+	}
+
+	// 2. Verify we can actually stop the goroutine
+	m.cancelFunc()
+
+	// The readInputStream goroutine defers closing streamChan
+	select {
+	case <-m.streamChan:
+		// Success: channel closed
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("FAILED: Goroutine did not exit (streamChan not closed) after calling cancelFunc")
 	}
 }
