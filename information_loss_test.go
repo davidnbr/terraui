@@ -1,37 +1,11 @@
 package main
 
 import (
-	"context"
 	"os"
 	"strings"
 	"testing"
 )
 
-// collectStreamMsgs reads all messages from a stream until Done, collecting
-// diagnostics, log lines, and resources separately.
-func collectStreamMsgs(m *Model, input string) (diagnostics []*Diagnostic, logs []string, resources []*ResourceChange) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go m.readInputStream(ctx, strings.NewReader(input))
-
-	for {
-		msg, ok := <-m.streamChan
-		if !ok || msg.Done {
-			break
-		}
-		if msg.Diagnostic != nil {
-			diagnostics = append(diagnostics, msg.Diagnostic)
-		}
-		if msg.LogLine != nil {
-			logs = append(logs, *msg.LogLine)
-		}
-		if msg.Resource != nil {
-			resources = append(resources, msg.Resource)
-		}
-	}
-	return
-}
 
 // =============================================================================
 // Bug 1: Diagnostic blocks without Error:/Warning: prefix are silently dropped
@@ -43,7 +17,7 @@ func TestDiagnosticBlockWithoutErrorPrefix_ProviderCrash(t *testing.T) {
 	// Real-world: provider crash message has NO "Error:" prefix
 	input := "╷\n│ The plugin encountered an error, and failed to respond to the\n│ plugin.(*GRPCProvider).ApplyResourceChange call. The plugin logs may\n│ contain more details.\n╵\n"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	// The content MUST appear somewhere - as a diagnostic or log lines
 	if len(diagnostics) == 0 && len(logs) == 0 {
@@ -76,7 +50,7 @@ func TestDiagnosticBlockWithoutErrorPrefix_PluginRequirements(t *testing.T) {
 	// Real-world: plugin requirements message
 	input := "╷\n│ Could not retrieve the list of available versions for provider\n│ hashicorp/google: could not connect to registry.terraform.io:\n│ TLS handshake timeout\n╵\n"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 && len(logs) == 0 {
 		t.Fatal("BUG: Plugin requirements diagnostic block was silently dropped")
@@ -107,7 +81,7 @@ func TestDiagnosticBlockWithoutErrorPrefix_GCPAuth(t *testing.T) {
 	// Real-world: GCP authentication failure without standard Error: prefix
 	input := "╷\n│ google: could not find default credentials. See\n│ https://cloud.google.com/docs/authentication/external/set-up-adc\n│ for more information\n╵\n"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 && len(logs) == 0 {
 		t.Fatal("BUG: GCP auth diagnostic block was silently dropped")
@@ -139,7 +113,7 @@ func TestDiagnosticBlockTruncatedStream(t *testing.T) {
 	// Stream ends mid-diagnostic (no closing ╵)
 	input := "╷\n│ Error: Error creating Instance: googleapi: Error 400: Invalid value\n│ \n│   with google_compute_instance.default,\n│   on main.tf line 10\n"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 && len(logs) == 0 {
 		t.Fatal("BUG: Truncated diagnostic block content was lost when stream ended without closing ╵")
@@ -171,7 +145,7 @@ func TestOverlappingDiagnosticBlocks(t *testing.T) {
 	// First diagnostic block is missing its closing ╵, second one starts immediately
 	input := "╷\n│ Error: First GCP error about instance creation\n│ \n│   on main.tf line 5\n╷\n│ Error: Second error about network configuration\n│ \n│   on main.tf line 10\n╵\n"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	// Both errors MUST be preserved
 	allContent := ""
@@ -204,7 +178,7 @@ func TestDiagnosticLineStripWithANSICodes(t *testing.T) {
 	// \x1b[1m = bold on, preserved by sanitizeTerraformANSI
 	input := "╷\n\x1b[1m│ Error: GCP instance type invalid\n\x1b[1m│ \n\x1b[1m│   on main.tf line 3\n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected diagnostic to be parsed from ANSI-prefixed lines")
@@ -234,7 +208,7 @@ func TestGCPAPIError(t *testing.T) {
 
 	input := "╷\n│ Error: Error creating Instance: googleapi: Error 400: Invalid value for field 'resource.machineType': 'zones/us-central1-a/machineTypes/n1-standard-99'. Machine type with name 'n1-standard-99' does not exist in zone 'us-central1-a'., invalid\n│ \n│   with google_compute_instance.default,\n│   on main.tf line 10, in resource \"google_compute_instance\" \"default\":\n│   10: resource \"google_compute_instance\" \"default\" {\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected GCP API error diagnostic")
@@ -271,7 +245,7 @@ func TestGCPPermissionDenied(t *testing.T) {
 
 	input := "╷\n│ Error: Error creating Network: googleapi: Error 403: Required 'compute.networks.create' permission for 'projects/my-project/global/networks/my-network', forbidden\n│ \n│   with google_compute_network.vpc,\n│   on network.tf line 1, in resource \"google_compute_network\" \"vpc\":\n│    1: resource \"google_compute_network\" \"vpc\" {\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected GCP permission error diagnostic")
@@ -290,7 +264,7 @@ func TestGCPQuotaExceeded(t *testing.T) {
 
 	input := "╷\n│ Error: Error creating Instance: googleapi: Error 403: Quota 'CPUS' exceeded. Limit: 8.0 in region us-central1., quotaExceeded\n│ \n│   with google_compute_instance.worker[3],\n│   on instances.tf line 15, in resource \"google_compute_instance\" \"worker\":\n│   15: resource \"google_compute_instance\" \"worker\" {\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected GCP quota error diagnostic")
@@ -310,7 +284,7 @@ func TestGCPMultipleErrors(t *testing.T) {
 	// Multiple GCP errors in sequence
 	input := "╷\n│ Error: Error creating Instance: googleapi: Error 400: Invalid value\n│ \n│   with google_compute_instance.web,\n│   on main.tf line 5\n│ \n╵\n╷\n│ Error: Error creating Disk: googleapi: Error 400: The disk resource is not found\n│ \n│   with google_compute_disk.data,\n│   on main.tf line 20\n│ \n╵\n╷\n│ Warning: Deprecated resource\n│ \n│ The google_compute_address resource has been deprecated.\n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) != 3 {
 		t.Fatalf("Expected 3 diagnostics (2 errors + 1 warning), got %d", len(diagnostics))
@@ -334,7 +308,7 @@ func TestGCPLongErrorWithMultilineDetails(t *testing.T) {
 	// GCP errors can have very long detail sections
 	input := "╷\n│ Error: Error creating Instance: googleapi: Error 400: Invalid value for field 'resource.networkInterfaces[0].subnetwork': 'projects/my-project/regions/us-central1/subnetworks/my-subnet'. The referenced subnetwork resource cannot be found., invalid\n│ \n│   with google_compute_instance.default,\n│   on main.tf line 10, in resource \"google_compute_instance\" \"default\":\n│   10: resource \"google_compute_instance\" \"default\" {\n│ \n│ The subnetwork 'my-subnet' was not found in the project 'my-project'.\n│ Ensure that the subnetwork exists and that you have the correct\n│ permissions to access it. You may need to run 'gcloud compute\n│ networks subnets list' to verify the subnetwork name.\n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected diagnostic for GCP network error")
@@ -456,10 +430,10 @@ func TestEmptyInputDetection_OnlyWhitespace(t *testing.T) {
 		ptyFile:    nil,
 	}
 
-	collectStreamMsgs(&m, "   \n\t\n   \n")
+	_, _, _, receivedContent := collectStreamMsgs(&m, "   \n\t\n   \n")
 
 	// Send Done through actual Update method
-	result, _ := m.Update(StreamMsg{Done: true})
+	result, _ := m.Update(StreamMsg{Done: true, ReceivedContent: receivedContent})
 	updated := result.(Model)
 
 	if len(updated.diagnostics) != 1 {
@@ -477,9 +451,9 @@ func TestEmptyInputDetection_WithContent(t *testing.T) {
 		ptyFile:    nil,
 	}
 
-	_, logs, _ := collectStreamMsgs(&m, "Terraform used the selected providers to generate the following execution plan.\n")
+	_, logs, _, receivedContent := collectStreamMsgs(&m, "Terraform used the selected providers to generate the following execution plan.\n")
 
-	result, _ := m.Update(StreamMsg{Done: true})
+	result, _ := m.Update(StreamMsg{Done: true, ReceivedContent: receivedContent})
 	updated := result.(Model)
 
 	for _, d := range updated.diagnostics {
@@ -498,7 +472,6 @@ func TestEmptyInputDetection_PTYMode(t *testing.T) {
 	m := Model{
 		streamChan:      make(chan StreamMsg, 10),
 		ptyFile:         os.Stderr, // Non-nil signals PTY mode
-		receivedContent: false,
 	}
 
 	result, _ := m.Update(StreamMsg{Done: true})
@@ -521,7 +494,7 @@ func TestNonStandardErrorFormat_NoDiagnosticBlock(t *testing.T) {
 
 	input := "panic: runtime error: index out of range [5] with length 3\n\ngoroutine 1 [running]:\nmain.main()\n\t/build/provider/main.go:42 +0x123\n"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	// Should NOT be parsed as diagnostic (no ╷...╵ block)
 	if len(diagnostics) != 0 {
@@ -547,7 +520,7 @@ func TestNonStandardErrorFormat_CustomModuleOutput(t *testing.T) {
 
 	input := "[ERROR] Custom provider failed to initialize\nDetails: Connection refused to endpoint https://api.custom-provider.io\nRetry count exceeded: 5 attempts\n"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	// Should NOT be parsed as diagnostic
 	if len(diagnostics) != 0 {
@@ -570,7 +543,7 @@ func TestNonStandardErrorFormat_NixOnPremise(t *testing.T) {
 
 	input := "FATAL: Failed to connect to internal API server\nContext: resource 'internal_vm' creation\nError: dial tcp 10.0.0.5:8080: connect: connection refused\nSuggestion: Verify VPN connection and firewall rules\n"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	// Should NOT be parsed as diagnostic
 	if len(diagnostics) != 0 {
@@ -596,7 +569,7 @@ func TestNonStandardErrorFormat_EmptyDiagnosticBlock(t *testing.T) {
 
 	input := "╷\n╵\nSome other error message here\n"
 
-	_, logs, _ := collectStreamMsgs(m, input)
+	_, logs, _, _ := collectStreamMsgs(m, input)
 
 	// Empty diagnostic block should not cause issues
 	// The "Some other error message" MUST still be preserved
@@ -612,7 +585,7 @@ func TestNonStandardErrorFormat_TruncatedDiagnostic(t *testing.T) {
 
 	input := "╷\n│ Some custom error without Error: prefix\n│ More details here\n│ Even more context"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	// Should be parsed as diagnostic (fallback in parseDiagnosticBlock)
 	// OR appear as logs if parsing fails
@@ -657,7 +630,7 @@ panic: something went wrong in custom provider
 Final log message
 `
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	// Collect all content
 	allContent := ""
@@ -704,7 +677,7 @@ Line 3: Some other text
 Line 4: More content here
 `
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	// All lines MUST appear as logs
 	if len(logs) != 4 {
@@ -739,7 +712,7 @@ func TestTextAgnostic_DiagnosticBlockAppearsAsBoth(t *testing.T) {
 
 	input := "╷\n│ Error: Something failed\n│ Details here\n╵\n"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	// Should be parsed as diagnostic
 	if len(diagnostics) != 1 {
@@ -781,7 +754,7 @@ func TestTextAgnostic_AnyFormatWorks(t *testing.T) {
 		m := &Model{streamChan: make(chan StreamMsg, 10)}
 		input := format + "\n"
 
-		diagnostics, logs, _ := collectStreamMsgs(m, input)
+		diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 		// Content MUST be preserved as logs
 		allContent := ""
@@ -808,7 +781,7 @@ Yet more text
 EOF marker
 `
 
-	_, logs, _ := collectStreamMsgs(m, input)
+	_, logs, _, _ := collectStreamMsgs(m, input)
 
 	// Every single line must be preserved
 	if len(logs) != 4 {
@@ -833,7 +806,7 @@ func TestAWSAPIError_InvalidInstanceType(t *testing.T) {
 
 	input := "╷\n│ Error: creating EC2 Instance: InvalidInstanceType: The instance type 't99.xlarge' is not supported.\n│ \n│   with aws_instance.web,\n│   on main.tf line 15, in resource \"aws_instance\" \"web\":\n│   15: resource \"aws_instance\" \"web\" {\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected AWS API error diagnostic")
@@ -858,7 +831,7 @@ func TestAWSAccessDenied(t *testing.T) {
 
 	input := "╷\n│ Error: creating IAM Role: AccessDenied: User: arn:aws:iam::123456789:user/dev is not authorized to perform: iam:CreateRole on resource: arn:aws:iam::123456789:role/my-role\n│ \n│   with aws_iam_role.my_role,\n│   on iam.tf line 5, in resource \"aws_iam_role\" \"my_role\":\n│    5: resource \"aws_iam_role\" \"my_role\" {\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected AWS access denied error diagnostic")
@@ -878,7 +851,7 @@ func TestAWSRateLimitExceeded(t *testing.T) {
 
 	input := "╷\n│ Error: creating Auto Scaling Group: RequestLimitExceeded: Request limit exceeded.\n│ \n│   with aws_autoscaling_group.worker,\n│   on asg.tf line 10, in resource \"aws_autoscaling_group\" \"worker\":\n│   10: resource \"aws_autoscaling_group\" \"worker\" {\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected AWS rate limit error diagnostic")
@@ -895,7 +868,7 @@ func TestAWSMultipleErrors(t *testing.T) {
 	// Multiple AWS errors in sequence
 	input := "╷\n│ Error: creating S3 Bucket: BucketAlreadyExists: The requested bucket name is not available.\n│ \n│   with aws_s3_bucket.data,\n│   on s3.tf line 3\n│ \n╵\n╷\n│ Error: creating VPC: VpcLimitExceeded: The maximum number of VPCs has been reached.\n│ \n│   with aws_vpc.main,\n│   on vpc.tf line 1\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) != 2 {
 		t.Fatalf("Expected 2 diagnostics, got %d", len(diagnostics))
@@ -919,7 +892,7 @@ func TestAzureAPIError_InvalidResourceGroup(t *testing.T) {
 
 	input := "╷\n│ Error: creating Resource Group: resources.GroupsClient#CreateOrUpdate: Failure responding to request: StatusCode=404 -- Original Error: autorest/azure: Service returned an error. Status=404 Code=\"ResourceGroupNotFound\" Message=\"Resource group 'my-rg' could not be found.\"\n│ \n│   with azurerm_resource_group.main,\n│   on main.tf line 8, in resource \"azurerm_resource_group\" \"main\":\n│    8: resource \"azurerm_resource_group\" \"main\" {\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected Azure API error diagnostic")
@@ -944,7 +917,7 @@ func TestAzureAuthorizationFailed(t *testing.T) {
 
 	input := "╷\n│ Error: creating Virtual Network: network.VirtualNetworksClient#CreateOrUpdate: Failure sending request: StatusCode=403 -- Original Error: Code=\"AuthorizationFailed\" Message=\"The client 'dev@company.com' with object id 'abc-123' does not have authorization to perform action 'Microsoft.Network/virtualNetworks/write' over scope '/subscriptions/xyz/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet'.\"\n│ \n│   with azurerm_virtual_network.main,\n│   on network.tf line 5, in resource \"azurerm_virtual_network\" \"main\":\n│    5: resource \"azurerm_virtual_network\" \"main\" {\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected Azure authorization error diagnostic")
@@ -964,7 +937,7 @@ func TestAzureQuotaExceeded(t *testing.T) {
 
 	input := "╷\n│ Error: creating Virtual Machine: compute.VirtualMachinesClient#CreateOrUpdate: Failure sending request: StatusCode=409 -- Original Error: Code=\"OperationNotAllowed\" Message=\"Operation results in exceeding quota limits of Core. Maximum allowed: 100, Current in use: 95, Additional requested: 10.\"\n│ \n│   with azurerm_linux_virtual_machine.worker,\n│   on vm.tf line 12, in resource \"azurerm_linux_virtual_machine\" \"worker\":\n│   12: resource \"azurerm_linux_virtual_machine\" \"worker\" {\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected Azure quota error diagnostic")
@@ -985,7 +958,7 @@ func TestAzureMultipleErrors(t *testing.T) {
 	// Multiple Azure errors in sequence
 	input := "╷\n│ Error: creating Storage Account: storage.AccountsClient#Create: Failure sending request: StatusCode=400 -- Original Error: Code=\"StorageAccountAlreadyTaken\" Message=\"The storage account named mystorage is already taken.\"\n│ \n│   with azurerm_storage_account.main,\n│   on storage.tf line 2\n│ \n╵\n╷\n│ Error: creating Public IP: network.PublicIPAddressesClient#CreateOrUpdate: Failure sending request: StatusCode=400 -- Original Error: Code=\"DnsRecordInUse\" Message=\"DNS record myip.eastus.cloudapp.azure.com is already used by another public IP.\"\n│ \n│   with azurerm_public_ip.main,\n│   on network.tf line 8\n│ \n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) != 2 {
 		t.Fatalf("Expected 2 diagnostics, got %d", len(diagnostics))
@@ -1010,7 +983,7 @@ func TestLineBufferFlushAtEOF_SingleLine(t *testing.T) {
 	// Input WITHOUT trailing newline - must still be captured
 	input := "Error: something went wrong"
 
-	_, logs, _ := collectStreamMsgs(m, input)
+	_, logs, _, _ := collectStreamMsgs(m, input)
 
 	allLogs := strings.Join(logs, "\n")
 	if !strings.Contains(allLogs, "something went wrong") {
@@ -1024,7 +997,7 @@ func TestLineBufferFlushAtEOF_AfterNewlines(t *testing.T) {
 	// Multiple lines, last one has no trailing newline
 	input := "Line one\nLine two\nLine three without newline"
 
-	_, logs, _ := collectStreamMsgs(m, input)
+	_, logs, _, _ := collectStreamMsgs(m, input)
 
 	if len(logs) != 3 {
 		t.Fatalf("Expected 3 log lines, got %d: %v", len(logs), logs)
@@ -1042,7 +1015,7 @@ func TestLineBufferFlushAtEOF_DiagnosticThenText(t *testing.T) {
 	// Diagnostic block followed by text without trailing newline
 	input := "╷\n│ Error: GCP auth failed\n╵\nFinal status: check logs"
 
-	diagnostics, logs, _ := collectStreamMsgs(m, input)
+	diagnostics, logs, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected diagnostic to be parsed")
@@ -1125,7 +1098,7 @@ func TestPreSeverityLinesPreserved_FullStream(t *testing.T) {
 	// Full stream with diagnostic block that has pre-severity context
 	input := "╷\n│ hashicorp/google: provider context\n│ Error: Failed to create resource\n│   on main.tf line 5\n╵\n"
 
-	diagnostics, _, _ := collectStreamMsgs(m, input)
+	diagnostics, _, _, _ := collectStreamMsgs(m, input)
 
 	if len(diagnostics) == 0 {
 		t.Fatal("Expected diagnostic to be parsed")
@@ -1229,7 +1202,7 @@ Terraform has been successfully initialized!
 Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
 `
 
-	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	diagnostics, logs, resources, _ := collectStreamMsgs(m, input)
 	allOutput := extractAllOutput(diagnostics, logs, resources)
 
 	for _, line := range meaningfulLines(input) {
@@ -1260,7 +1233,7 @@ func TestZeroLossInvariant_AWSErrors(t *testing.T) {
 Plan failed with 2 errors.
 `
 
-	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	diagnostics, logs, resources, _ := collectStreamMsgs(m, input)
 	allOutput := extractAllOutput(diagnostics, logs, resources)
 
 	for _, line := range meaningfulLines(input) {
@@ -1291,7 +1264,7 @@ func TestZeroLossInvariant_AzureErrors(t *testing.T) {
 Error: Terraform exited with 2 errors.
 `
 
-	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	diagnostics, logs, resources, _ := collectStreamMsgs(m, input)
 	allOutput := extractAllOutput(diagnostics, logs, resources)
 
 	for _, line := range meaningfulLines(input) {
@@ -1316,7 +1289,7 @@ FATAL: connection to 10.0.0.5:8080 refused
 Recovery suggestion: restart the provider
 `
 
-	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	diagnostics, logs, resources, _ := collectStreamMsgs(m, input)
 	allOutput := extractAllOutput(diagnostics, logs, resources)
 
 	for _, line := range meaningfulLines(input) {
@@ -1332,7 +1305,7 @@ func TestZeroLossInvariant_NoTrailingNewline(t *testing.T) {
 	// No trailing newline on last line
 	input := "First line\nSecond line\nThird line without newline"
 
-	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	diagnostics, logs, resources, _ := collectStreamMsgs(m, input)
 	allOutput := extractAllOutput(diagnostics, logs, resources)
 
 	for _, line := range meaningfulLines(input) {
@@ -1372,7 +1345,7 @@ Plan: 2 to add, 0 to change, 0 to destroy.
 ╵
 `
 
-	diagnostics, logs, resources := collectStreamMsgs(m, input)
+	diagnostics, logs, resources, _ := collectStreamMsgs(m, input)
 
 	// Resources must be parsed
 	if len(resources) < 2 {

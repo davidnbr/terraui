@@ -36,7 +36,7 @@ func TestAWSProviderErrors(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Model{streamChan: make(chan StreamMsg, 10)}
-			diagnostics, logs, _ := collectStreamMsgs(m, tc.input)
+			diagnostics, logs, _, _ := collectStreamMsgs(m, tc.input)
 
 			allContent := ""
 			for _, d := range diagnostics {
@@ -90,7 +90,7 @@ func TestGCPProviderErrors(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Model{streamChan: make(chan StreamMsg, 10)}
-			diagnostics, logs, _ := collectStreamMsgs(m, tc.input)
+			diagnostics, logs, _, _ := collectStreamMsgs(m, tc.input)
 
 			allContent := ""
 			for _, d := range diagnostics {
@@ -138,7 +138,7 @@ func TestAzureProviderErrors(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Model{streamChan: make(chan StreamMsg, 10)}
-			diagnostics, logs, _ := collectStreamMsgs(m, tc.input)
+			diagnostics, logs, _, _ := collectStreamMsgs(m, tc.input)
 
 			allContent := ""
 			for _, d := range diagnostics {
@@ -183,7 +183,7 @@ func TestTerraformPlanErrors(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Model{streamChan: make(chan StreamMsg, 10)}
-			diagnostics, logs, _ := collectStreamMsgs(m, tc.input)
+			diagnostics, logs, _, _ := collectStreamMsgs(m, tc.input)
 
 			allContent := ""
 			for _, d := range diagnostics {
@@ -225,7 +225,7 @@ func TestTerraformApplyErrors(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Model{streamChan: make(chan StreamMsg, 10)}
-			diagnostics, logs, _ := collectStreamMsgs(m, tc.input)
+			diagnostics, logs, _, _ := collectStreamMsgs(m, tc.input)
 
 			allContent := ""
 			for _, d := range diagnostics {
@@ -267,7 +267,7 @@ func TestTerraformInitErrors(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Model{streamChan: make(chan StreamMsg, 10)}
-			diagnostics, logs, _ := collectStreamMsgs(m, tc.input)
+			diagnostics, logs, _, _ := collectStreamMsgs(m, tc.input)
 
 			allContent := ""
 			for _, d := range diagnostics {

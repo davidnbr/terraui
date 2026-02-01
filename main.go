@@ -120,8 +120,9 @@ type StreamMsg struct {
 	Resource   *ResourceChange
 	Diagnostic *Diagnostic
 	LogLine    *string
-	Prompt     *string // Partial line that looks like a prompt (no trailing newline)
-	Done       bool    // Signals end of input stream
+	Prompt          *string // Partial line that looks like a prompt (no trailing newline)
+	Done            bool    // Signals end of input stream
+	ReceivedContent bool    // True if any non-empty content was received (only meaningful with Done)
 }
 
 // tickMsg triggers periodic UI updates for batched rendering
@@ -165,9 +166,6 @@ type Model struct {
 
 	// Cached theme to avoid repeated allocations during rendering
 	cachedTheme *Theme
-
-	// Input detection for pipe mode warning
-	receivedContent bool // Tracks if any content was received from stdin
 
 	// Exit code tracking for error detection
 	exitCode int  // Exit code from terraform command (0 = success)
@@ -301,6 +299,7 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 	inResource := false
 	inDiagnostic := false
 	bracketDepth := 0
+	receivedContent := false
 
 	processLine := func(rawLine string) {
 		cleanLine := stripANSI(rawLine)
@@ -308,7 +307,7 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 
 		// Track that we received meaningful content
 		if strings.TrimSpace(cleanLine) != "" {
-			m.receivedContent = true
+			receivedContent = true
 		}
 
 		// Diagnostic block handling
@@ -527,7 +526,7 @@ func (m *Model) readInputStream(ctx context.Context, reader io.Reader) {
 	}
 
 	select {
-	case m.streamChan <- StreamMsg{Done: true}:
+	case m.streamChan <- StreamMsg{Done: true, ReceivedContent: receivedContent}:
 	case <-ctx.Done():
 	}
 }
@@ -719,7 +718,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.done = true
 			// Check if we're in pipe mode (no PTY) and received no content
 			// This indicates the user likely forgot to redirect stderr (2>&1)
-			if m.ptyFile == nil && !m.receivedContent {
+			if m.ptyFile == nil && !msg.ReceivedContent {
 				warning := Diagnostic{
 					Severity: "warning",
 					Summary:  "No input received from Terraform - errors may have been sent to stderr",
@@ -737,11 +736,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Resource != nil {
 			m.resources = append(m.resources, *msg.Resource)
-			m.showLogs = false
+			// Only auto-switch to PLAN if no error diagnostics have arrived.
+			// Once errors are present, stay in LOG so they remain visible.
+			hasErrors := false
+			for _, d := range m.diagnostics {
+				if d.Severity == "error" {
+					hasErrors = true
+					break
+				}
+			}
+			if !hasErrors {
+				m.showLogs = false
+			}
 			m.needsSync = true
 		}
 		if msg.Diagnostic != nil {
 			m.diagnostics = append(m.diagnostics, *msg.Diagnostic)
+			// Fix timing gap: if an error occurs, switch to LOG view immediately
+			// so the user sees it, rather than waiting for exit code.
+			if msg.Diagnostic.Severity == "error" {
+				m.showLogs = true
+			}
 			m.needsSync = true
 		}
 		if msg.LogLine != nil {

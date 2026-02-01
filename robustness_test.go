@@ -30,7 +30,7 @@ func TestAllContentPreserved(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &Model{streamChan: make(chan StreamMsg, 100)}
-			diagnostics, logs, _ := collectStreamMsgs(m, tc.input)
+			diagnostics, logs, _, _ := collectStreamMsgs(m, tc.input)
 
 			var output strings.Builder
 			for _, d := range diagnostics {
@@ -133,14 +133,16 @@ func TestExitCodeDeterminesErrorState(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(fmt.Sprintf("exit_code_%d", tc.exitCode), func(t *testing.T) {
-			m := Model{
-				exitCode: tc.exitCode,
-				hasError: tc.exitCode != 0,
-			}
+			m := Model{}
+			msg := exitCodeMsg{exitCode: tc.exitCode, hasError: tc.exitCode != 0}
 
-			if m.hasError != tc.expectError {
+			// Call the actual logic
+			updatedM, _ := m.Update(msg)
+			finalM := updatedM.(Model)
+
+			if finalM.hasError != tc.expectError {
 				t.Errorf("exitCode=%d: expected hasError=%v, got %v",
-					tc.exitCode, tc.expectError, m.hasError)
+					tc.exitCode, tc.expectError, finalM.hasError)
 			}
 		})
 	}
@@ -156,16 +158,14 @@ func TestAutoSwitchToLogViewOnError(t *testing.T) {
 
 	msg := exitCodeMsg{exitCode: 1, hasError: true}
 
-	if msg.hasError {
-		m.showLogs = true
-		m.exitCode = msg.exitCode
-		m.hasError = msg.hasError
-	}
+	// Call the actual logic under test
+	updatedM, _ := m.Update(msg)
+	finalM := updatedM.(Model)
 
-	if !m.showLogs {
+	if !finalM.showLogs {
 		t.Error("Expected view to auto-switch to LOG on error")
 	}
-	if !m.hasError {
+	if !finalM.hasError {
 		t.Error("Expected hasError to be true")
 	}
 }
